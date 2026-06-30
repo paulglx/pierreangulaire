@@ -12,6 +12,9 @@ import { type LoadedSeries, loadSeries } from './dicom';
 const statusEl = document.querySelector<HTMLDivElement>('#status')!;
 const folderInput = document.querySelector<HTMLInputElement>('#folder')!;
 const filesInput = document.querySelector<HTMLInputElement>('#files')!;
+const kebabButton = document.querySelector<HTMLButtonElement>('#kebab')!;
+
+const KEBAB_RAD_PER_SEC = (2 * Math.PI) / 24;
 
 const PANELS: { id: string; orientation: Orientation }[] = [
   { id: 'axial', orientation: 'axial' },
@@ -23,6 +26,43 @@ const BLEND_NAMES = ['MIP', 'MinIP', 'Average', 'Composite'];
 
 let activeViewportIds: string[] = [];
 
+interface KebabEntry {
+  viewport: Viewport;
+  baseNormal: Vec3;
+  baseUp: Vec3;
+}
+
+let kebabEntries: KebabEntry[] = [];
+let kebabEnabled = false;
+let kebabRaf = 0;
+let kebabAngle = 0;
+let kebabLast = 0;
+
+function kebabFrame(now: number): void {
+  if (!kebabEnabled) return;
+  if (kebabLast !== 0) {
+    kebabAngle += ((now - kebabLast) / 1000) * KEBAB_RAD_PER_SEC;
+  }
+  kebabLast = now;
+  for (const { viewport, baseNormal, baseUp } of kebabEntries) {
+    viewport.camera.normal = rotateAroundAxis(baseNormal, baseUp, kebabAngle);
+    viewport.markDirty();
+  }
+  kebabRaf = requestAnimationFrame(kebabFrame);
+}
+
+function setKebab(enabled: boolean): void {
+  kebabEnabled = enabled;
+  kebabButton.textContent = `Kebab mode: ${enabled ? 'on' : 'off'}`;
+  kebabButton.classList.toggle('on', enabled);
+  if (enabled) {
+    kebabLast = 0;
+    kebabRaf = requestAnimationFrame(kebabFrame);
+  } else {
+    cancelAnimationFrame(kebabRaf);
+  }
+}
+
 function setStatus(message: string): void {
   statusEl.textContent = message;
 }
@@ -33,6 +73,21 @@ function nextFrame(): Promise<void> {
 
 function dotVec(a: Vec3, b: Vec3): number {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function rotateAroundAxis(v: Vec3, axis: Vec3, angle: number): Vec3 {
+  const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+  const kx = axis[0] / len;
+  const ky = axis[1] / len;
+  const kz = axis[2] / len;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const parallel = (kx * v[0] + ky * v[1] + kz * v[2]) * (1 - cos);
+  return [
+    v[0] * cos + (ky * v[2] - kz * v[1]) * sin + kx * parallel,
+    v[1] * cos + (kz * v[0] - kx * v[2]) * sin + ky * parallel,
+    v[2] * cos + (kx * v[1] - ky * v[0]) * sin + kz * parallel,
+  ];
 }
 
 function projectionScale(volume: Volume, direction: Vec3, factor: number): number {
@@ -210,6 +265,9 @@ async function open(files: File[]): Promise<void> {
 
   for (const id of activeViewportIds) engine.destroyViewport(id);
   activeViewportIds = [];
+  kebabEntries = [];
+  kebabAngle = 0;
+  kebabLast = 0;
 
   const volume = engine.createVolume(series.geometry, series.format);
   const [dx, dy, dz] = series.geometry.dims;
@@ -225,6 +283,11 @@ async function open(files: File[]): Promise<void> {
     viewport.setWindowLevel({ center: series.windowCenter, width: series.windowWidth });
     buildControls(viewport, volume, series);
     activeViewportIds.push(panel.id);
+    kebabEntries.push({
+      viewport,
+      baseNormal: viewport.camera.normal,
+      baseUp: viewport.camera.up,
+    });
 
     const observer = new ResizeObserver(() => {
       engine.resizeViewport(panel.id);
@@ -243,3 +306,4 @@ function filesFrom(input: HTMLInputElement): File[] {
 
 folderInput.addEventListener('change', () => void open(filesFrom(folderInput)));
 filesInput.addEventListener('change', () => void open(filesFrom(filesInput)));
+kebabButton.addEventListener('click', () => setKebab(!kebabEnabled));

@@ -50,6 +50,23 @@
       label.action input {
         display: none;
       }
+      button.toggle {
+        font: inherit;
+        background: transparent;
+        border: 1px solid var(--muted);
+        color: var(--text);
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+      }
+      button.toggle:hover {
+        border-color: var(--text);
+      }
+      button.toggle.on {
+        background: var(--text);
+        color: var(--page);
+        border-color: var(--text);
+      }
       #status {
         color: var(--muted);
         margin-left: auto;
@@ -128,6 +145,7 @@
         Open files
         <input id="files" type="file" multiple />
       </label>
+      <button id="kebab" class="toggle" type="button">Kebab mode: off</button>
       <div id="status">Select a folder of DICOM files representing one volume.</div>
     </header>
     <main>
