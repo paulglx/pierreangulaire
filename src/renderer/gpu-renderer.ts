@@ -36,7 +36,12 @@ export class GPURenderer implements Renderer {
     if (!adapter) {
       throw new Error('No WebGPU adapter found.');
     }
-    this.device = await adapter.requestDevice();
+    this.device = await adapter.requestDevice({
+      requiredLimits: {
+        maxBufferSize: adapter.limits.maxBufferSize,
+        maxTextureDimension3D: adapter.limits.maxTextureDimension3D,
+      },
+    });
     this.format = navigator.gpu.getPreferredCanvasFormat();
 
     const module = this.device.createShaderModule({ code: RAYCAST_SHADER });

@@ -417,7 +417,7 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 ### 18.2 Simplifications
 
 - The CPU brick store keeps a **dense** voxel array; the page table tracks residency for streaming and dirty-region upload rather than backing a packed sparse pool.
-- The `GPURenderer` mirrors each volume into a single dense **`r32float` 3D texture** (not an atlas); resident bricks are written as texture sub-regions. Image sampling is trilinear via `textureLoad` (no sampler), satisfying the Linear default.
+- The `GPURenderer` mirrors each volume into a single dense **`r32float` 3D texture** (not an atlas); resident bricks are written as texture sub-regions. Image sampling is trilinear via `textureLoad` (no sampler), satisfying the Linear default. Because a dense volume and the staging for its brick uploads can be large, the device is requested with the adapter's maximum `maxBufferSize` and `maxTextureDimension3D` rather than the conservative defaults.
 - The scheduler (§5.4) is not prioritized: arrivals are coalesced into per-frame dirty-brick uploads in slice order.
 
 ### 18.3 Not yet implemented

@@ -1,5 +1,6 @@
-import dicomParser, { type DataSet } from 'dicom-parser';
+import dicomParser, { type DataSet, type Element } from 'dicom-parser';
 import type { Vec3, VolumeFormat, VolumeGeometry } from 'pierreangulaire';
+import { decodeJpegLossless, decodeRle, type FrameInfo, type PixelSamples } from './decode';
 
 export interface LoadedSeries {
   geometry: VolumeGeometry;
@@ -17,8 +18,15 @@ interface ParsedSlice {
   values: Float32Array;
 }
 
-const COMPRESSED_PREFIXES = ['1.2.840.10008.1.2.4', '1.2.840.10008.1.2.5'];
+const RLE_LOSSLESS = '1.2.840.10008.1.2.5';
+const JPEG_LOSSLESS = new Set(['1.2.840.10008.1.2.4.57', '1.2.840.10008.1.2.4.70']);
+const JPEG_FAMILY_PREFIX = '1.2.840.10008.1.2.4';
 const BIG_ENDIAN = '1.2.840.10008.1.2.2';
+
+function isUnsupportedTransferSyntax(transferSyntax: string): boolean {
+  if (transferSyntax === RLE_LOSSLESS || JPEG_LOSSLESS.has(transferSyntax)) return false;
+  return transferSyntax.startsWith(JPEG_FAMILY_PREFIX);
+}
 
 function cross(a: Vec3, b: Vec3): Vec3 {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -47,31 +55,69 @@ function vec3From(values: number[], offset: number): Vec3 | null {
   return [x, y, z];
 }
 
-function readPixelValues(dataSet: DataSet): Float32Array | null {
+function encodedFrameBytes(dataSet: DataSet, pixelData: Element): Uint8Array {
+  const fragmentCount = pixelData.fragments?.length ?? 0;
+  const bytes = dicomParser.readEncapsulatedPixelDataFromFragments(
+    dataSet,
+    pixelData,
+    0,
+    fragmentCount,
+  );
+  return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+}
+
+function readNativeSamples(dataSet: DataSet, pixelData: Element, info: FrameInfo): PixelSamples {
+  const count = info.rows * info.columns;
+  const bytesPerSample = info.bitsAllocated <= 8 ? 1 : 2;
+  const bytes = dataSet.byteArray.slice(
+    pixelData.dataOffset,
+    pixelData.dataOffset + count * bytesPerSample,
+  );
+  if (info.bitsAllocated <= 8) {
+    return info.signed
+      ? new Int8Array(bytes.buffer, bytes.byteOffset, count)
+      : new Uint8Array(bytes.buffer, bytes.byteOffset, count);
+  }
+  return info.signed
+    ? new Int16Array(bytes.buffer, bytes.byteOffset, count)
+    : new Uint16Array(bytes.buffer, bytes.byteOffset, count);
+}
+
+function decodeSamples(
+  dataSet: DataSet,
+  pixelData: Element,
+  transferSyntax: string,
+  info: FrameInfo,
+): PixelSamples {
+  if (transferSyntax === RLE_LOSSLESS) {
+    return decodeRle(encodedFrameBytes(dataSet, pixelData), info);
+  }
+  if (JPEG_LOSSLESS.has(transferSyntax)) {
+    return decodeJpegLossless(encodedFrameBytes(dataSet, pixelData), info);
+  }
+  return readNativeSamples(dataSet, pixelData, info);
+}
+
+function readPixelValues(dataSet: DataSet, transferSyntax: string): Float32Array | null {
   const pixelData = dataSet.elements['x7fe00010'];
   const rows = dataSet.uint16('x00280010');
   const columns = dataSet.uint16('x00280011');
-  const bitsAllocated = dataSet.uint16('x00280100') ?? 16;
-  const signed = dataSet.uint16('x00280103') === 1;
   if (!pixelData || !rows || !columns) return null;
-
-  const slope = dataSet.floatString('x00281053') ?? 1;
-  const intercept = dataSet.floatString('x00281052') ?? 0;
-  const count = rows * columns;
-  const bytes = dataSet.byteArray.slice(
-    pixelData.dataOffset,
-    pixelData.dataOffset + count * (bitsAllocated / 8),
-  );
-
-  let raw: Int16Array | Uint16Array | Uint8Array;
-  if (bitsAllocated === 8) {
-    raw = bytes;
-  } else if (signed) {
-    raw = new Int16Array(bytes.buffer, 0, count);
-  } else {
-    raw = new Uint16Array(bytes.buffer, 0, count);
+  if ((dataSet.uint16('x00280002') ?? 1) !== 1) {
+    throw new Error('Only single-sample grayscale images are supported.');
   }
 
+  const info: FrameInfo = {
+    rows,
+    columns,
+    bitsAllocated: dataSet.uint16('x00280100') ?? 16,
+    signed: dataSet.uint16('x00280103') === 1,
+  };
+  const slope = dataSet.floatString('x00281053') ?? 1;
+  const intercept = dataSet.floatString('x00281052') ?? 0;
+
+  const raw = decodeSamples(dataSet, pixelData, transferSyntax, info);
+  const count = rows * columns;
   const values = new Float32Array(count);
   for (let i = 0; i < count; i++) values[i] = raw[i]! * slope + intercept;
   return values;
@@ -79,14 +125,16 @@ function readPixelValues(dataSet: DataSet): Float32Array | null {
 
 function parseSlice(dataSet: DataSet): ParsedSlice | null {
   const transferSyntax = dataSet.string('x00020010') ?? '';
-  if (COMPRESSED_PREFIXES.some((prefix) => transferSyntax.startsWith(prefix))) {
-    throw new Error('Compressed DICOM is not supported by this minimal viewer.');
-  }
   if (transferSyntax === BIG_ENDIAN) {
     throw new Error('Big-endian DICOM is not supported by this minimal viewer.');
   }
+  if (isUnsupportedTransferSyntax(transferSyntax)) {
+    throw new Error(
+      'This DICOM transfer syntax is not supported. Supported: uncompressed, RLE Lossless, and JPEG Lossless.',
+    );
+  }
   const position = vec3From(numbersFromString(dataSet.string('x00200032')), 0);
-  const values = readPixelValues(dataSet);
+  const values = readPixelValues(dataSet, transferSyntax);
   if (!position || !values) return null;
   return { position, values };
 }
