@@ -44,7 +44,6 @@ export class RenderingEngine {
     const volume = new Volume(id, geometry, format, this.brickSize);
     this.volumes.set(id, volume);
     this.renderer.onVolumeCreated(volume);
-    volume.onSliceWritten(() => this.markVolumeDirty(volume.id));
     return volume;
   }
 
@@ -91,16 +90,14 @@ export class RenderingEngine {
     for (const viewport of targets) viewport.dirty = false;
   }
 
-  private markVolumeDirty(volumeId: string): void {
-    for (const viewport of this.viewports.values()) {
-      if (viewport.volume.id === volumeId) viewport.markDirty();
-    }
-  }
-
   private uploadDirtyBricks(): void {
     for (const volume of this.volumes.values()) {
       const dirty = volume.store.takeDirtyBricks();
-      if (dirty.length > 0) this.renderer.uploadBricks(volume, dirty);
+      if (dirty.length === 0) continue;
+      this.renderer.uploadBricks(volume, dirty);
+      for (const viewport of this.viewports.values()) {
+        if (viewport.volume.id === volume.id) viewport.markDirty();
+      }
     }
   }
 

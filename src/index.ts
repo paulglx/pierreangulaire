@@ -4,7 +4,6 @@ export { initRenderingEngine, getRenderingEngine, RenderingEngine } from './rend
 export type { RenderingEngineOptions, CreateViewportOptions } from './rendering-engine';
 
 export { Volume } from './volume';
-export type { SliceListener } from './volume';
 
 export { Viewport } from './viewport';
 

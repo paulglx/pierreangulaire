@@ -327,7 +327,7 @@ The callback receives the prompt geometry (box bounds, or labeled points) togeth
 
 ## 13. Events
 
-Events are dispatched on the viewport's DOM element and on a global event target. The set covers: image-volume modified, brick loaded, camera modified, VOI (window/level) modified, segmentation modified, segmentation rendered, and annotation added / modified.
+The library fires events for every action the caller may want to react to.
 
 ---
 
@@ -422,4 +422,4 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 
 ### 18.3 Not yet implemented
 
-Segmentation (§6) and its editing/prompt tools, all camera/annotation tools and the SVG overlay (§11, §12), the DOM/global event set (§13), the prioritized scheduler (§5.4), the `CPURenderer` (§7.1), and the `GPURenderer` compute fast paths — gradient precompute and histogram auto window/level (§7.1, §15).
+Segmentation (§6) and its editing/prompt tools, all camera/annotation tools and the SVG overlay (§11, §12), events (§13), the prioritized scheduler (§5.4), the `CPURenderer` (§7.1), and the `GPURenderer` compute fast paths — gradient precompute and histogram auto window/level (§7.1, §15).
