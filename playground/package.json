@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "dicom-parser": "^1.8.21",
     "pierreangulaire": "workspace:*"
   },
   "devDependencies": {
