@@ -1,0 +1,44 @@
+{
+  "name": "pierreangulaire",
+  "version": "0.0.0",
+  "description": "Medical 3D imaging library for the browser.",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "playground": "pnpm --filter playground dev",
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.71",
+    "lefthook": "^2.1.9",
+    "oxfmt": "^0.57.0",
+    "oxlint": "^1.72.0",
+    "tsdown": "^0.22.3",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@10.33.2"
+}
