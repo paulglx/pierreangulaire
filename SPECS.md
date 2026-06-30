@@ -4,6 +4,14 @@ A medical 3D imaging library for the browser, implemented entirely in TypeScript
 
 ---
 
+## 0. Philosophy
+
+- This lib works hard so implementers don't have to. The domain is complex but pierreangulaire must not be complicated.
+- We only depend on other libraries if absolutely necessary.
+- Coverage % must never go down.
+- The best code is no code, we follow the KISS principle.
+- Never leave room for things that don't exist yet. Every method should be used.
+
 ## 1. Scope
 
 - 3D viewport only. A viewport shows **exactly one** grayscale image volume, plus **zero or one** segmentation volume.
@@ -388,3 +396,30 @@ The published artifact is `dist/` (`index.js` + `index.d.ts`); only `src/` is sh
 | Loading                        | Progressive, full slice by slice, always                            |
 | Projection                     | Orthographic, always                                                |
 | Default slab thickness         | One voxel (thin slab)                                               |
+
+---
+
+## 18. Implementation status
+
+The codebase currently implements the **minimal grayscale rendering path** end to end: load a volume from geometry, stream its slices, and render it in orthographic slab viewports through the `GPURenderer`. Everything below conforms to the model defined above; the rest of the surface is not built yet.
+
+### 18.1 Implemented
+
+- **Geometry & coordinates** (§4): `VolumeGeometry` with index↔world transforms.
+- **Brick store** (§5.1–5.3): page table with `Absent` / `Loading` / `Resident` states, progressive slice writes flipping bricks resident band by band, dirty-brick tracking, and on-demand voxel sampling.
+- **Volume** (§5.2): two-phase lifecycle (geometry first, slices streamed), slice writes, slice-loaded query.
+- **Camera** (§8): orthographic camera (`normal`, `up`, `focalPoint`, `zoom`), `axial` / `coronal` / `sagittal` / `acquisition` presets, synchronous world↔canvas transforms, slab scroll along `normal`.
+- **Viewport** (§9): one canvas + one volume, window/level, blend mode, slab thickness, voxel sampling.
+- **RenderingEngine** (§10): singleton module accessor + one-time async init, `createVolume` / `createViewport`, and a `requestAnimationFrame` loop that uploads dirty bricks and redraws dirty viewports.
+- **GPURenderer** (§7, §14): WebGPU orthographic slab raycast in WGSL, one canvas context per viewport, per-brick texture upload.
+- **Blend modes** (§7.3): MIP, MinIP, Average. Composite is a basic front-to-back accumulation (grayscale used as opacity).
+
+### 18.2 Simplifications
+
+- The CPU brick store keeps a **dense** voxel array; the page table tracks residency for streaming and dirty-region upload rather than backing a packed sparse pool.
+- The `GPURenderer` mirrors each volume into a single dense **`r32float` 3D texture** (not an atlas); resident bricks are written as texture sub-regions. Image sampling is trilinear via `textureLoad` (no sampler), satisfying the Linear default.
+- The scheduler (§5.4) is not prioritized: arrivals are coalesced into per-frame dirty-brick uploads in slice order.
+
+### 18.3 Not yet implemented
+
+Segmentation (§6) and its editing/prompt tools, all camera/annotation tools and the SVG overlay (§11, §12), the DOM/global event set (§13), the prioritized scheduler (§5.4), the `CPURenderer` (§7.1), and the `GPURenderer` compute fast paths — gradient precompute and histogram auto window/level (§7.1, §15).

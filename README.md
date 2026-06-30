@@ -4,7 +4,11 @@ Medical 3D imaging library for the browser — WebGPU volume rendering, brick-ba
 streaming, segmentation, viewports and tools. See [`SPECS.md`](./SPECS.md) for the
 full specification.
 
-> Scaffold stage: the public API is intentionally empty beyond a `VERSION` export.
+> Minimal stage: the grayscale rendering path is implemented end to end — load a
+> volume, stream its slices, and view it in orthographic axial/coronal/sagittal
+> slab viewports via the WebGPU renderer. See [`SPECS.md` §18](./SPECS.md) for the
+> exact implementation status. Run `pnpm playground` and open a folder of DICOM
+> files to try it (requires a WebGPU-capable browser).
 
 ## Prerequisites
 
