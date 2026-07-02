@@ -82,6 +82,19 @@ export class GPURenderer implements Renderer {
     this.volumes.set(volume.id, { texture, view: texture.createView() });
   }
 
+  onVolumeDestroyed(id: string): void {
+    const resource = this.volumes.get(id);
+    if (!resource) return;
+    resource.texture.destroy();
+    this.volumes.delete(id);
+    for (const viewport of this.viewports.values()) {
+      if (viewport.bindGroupVolumeId === id) {
+        viewport.bindGroup = null;
+        viewport.bindGroupVolumeId = null;
+      }
+    }
+  }
+
   uploadBricks(volume: Volume, brickIndices: number[]): void {
     const resource = this.volumes.get(volume.id);
     if (!resource) return;
@@ -169,6 +182,13 @@ export class GPURenderer implements Renderer {
     if (submitted) {
       this.device.queue.submit([encoder.finish()]);
     }
+  }
+
+  destroy(): void {
+    for (const id of this.viewports.keys()) this.destroyViewport(id);
+    for (const resource of this.volumes.values()) resource.texture.destroy();
+    this.volumes.clear();
+    this.device.destroy();
   }
 }
 
