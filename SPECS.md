@@ -214,7 +214,7 @@ The image appearance is window/level only (window width and window center), appl
 
 ### 7.5 Render loop
 
-The loop lives in TypeScript. Viewports carry dirty flags. Each frame, the `RenderingEngine` renders the dirty viewports through the active renderer — the `GPURenderer` records one command buffer per dirty canvas and submits; the `CPURenderer` raycasts each dirty viewport in its worker pool and blits the result. Brick arrivals and state changes set dirty flags.
+The loop lives in TypeScript. Viewports carry dirty flags. Each frame, the `RenderingEngine` renders the dirty viewports through the active renderer — the `GPURenderer` records one command buffer per dirty canvas and submits; the `CPURenderer` raycasts each dirty viewport in its worker pool and blits the result. Brick arrivals and state changes set dirty flags. The loop is stopped on engine teardown (§10).
 
 ---
 
@@ -258,10 +258,11 @@ A viewport is bound to one canvas and one image volume, and exposes:
 There is exactly one `RenderingEngine` for the lifetime of the application. It is not constructed directly; it is reached through a module-level accessor that always returns the same instance. Initialization happens once before first use; calling it again is a no-op.
 
 - **Options**: renderer selection (`GPURenderer` / `CPURenderer`; default auto — `GPURenderer` when WebGPU is available, otherwise `CPURenderer`), brick size (default 32), and segmentation overlap depth K (default 4, optionally 8).
-- **Volumes**: created from geometry and a voxel format (Int16, Uint16, Uint8, or Float32); each volume exposes its geometry, format, built-in segmentation, slice writes, and a slice-loaded query.
+- **Volumes**: created from geometry and a voxel format (Int16, Uint16, Uint8, or Float32); each volume exposes its geometry, format, built-in segmentation, slice writes, and a slice-loaded query. Destroying a volume releases its brick store and the renderer's mirror of it; a volume still referenced by a live viewport cannot be destroyed — destroy the viewport first.
 - **Viewports**: created, looked up, and destroyed through the engine.
 - **Scheduler**: owned by the engine (§5.4).
 - **Render**: a single entry point that renders the given viewports, or all dirty ones when unspecified.
+- **Teardown**: destroying the engine stops the render loop, releases every viewport and volume, tears down the active renderer (the `GPURenderer` destroys its device), and resets the singleton so a later init starts fresh.
 
 ---
 
@@ -335,9 +336,9 @@ The library fires events for every action the caller may want to react to.
 
 Renderers are swappable behind a single interface; nothing above it depends on WebGPU. An implementation receives the renderer-agnostic state (scene, brick store, page tables, label table, camera, per-viewport view state) and is responsible only for producing pixels.
 
-The interface groups into: lifecycle (initialize; register / resize / destroy a viewport canvas); state-sync notifications (brick uploaded / dirtied, label-table edit, and camera / window-level / blend / slab / segmentation-visibility changes); and render (draw the given viewport ids). The `GPURenderer` implements it against WebGPU — mirroring bricks into GPU textures, WGSL pipelines, one canvas context per viewport. The `CPURenderer` (planned) implements it as a worker-pool software raycaster reading the brick store directly. Identifiers are plain string ids / object references; there is no foreign-function boundary and no handle marshaling.
+The interface groups into: lifecycle (initialize; volume created / destroyed; register / resize / destroy a viewport canvas; destroy the renderer itself); state-sync notifications (brick uploaded / dirtied, label-table edit, and camera / window-level / blend / slab / segmentation-visibility changes); and render (draw the given viewport ids). The `GPURenderer` implements it against WebGPU — mirroring bricks into GPU textures, WGSL pipelines, one canvas context per viewport. The `CPURenderer` (planned) implements it as a worker-pool software raycaster reading the brick store directly. Identifiers are plain string ids / object references; there is no foreign-function boundary and no handle marshaling.
 
-The rest of the engine surface is ordinary TypeScript: viewport lifecycle; volume create plus slice writes and slice-loaded queries (volume creation also allocates the built-in segmentation); segmentation access by owning volume, label edits, paint / erase, stroke grouping, and undo / redo; viewport state setters (attached volume, segmentation visibility, camera, window/level, blend mode, slab thickness); and on-demand voxel sampling.
+The rest of the engine surface is ordinary TypeScript: viewport lifecycle; volume create and destroy plus slice writes and slice-loaded queries (volume creation also allocates the built-in segmentation); segmentation access by owning volume, label edits, paint / erase, stroke grouping, and undo / redo; viewport state setters (attached volume, segmentation visibility, camera, window/level, blend mode, slab thickness); and on-demand voxel sampling.
 
 ---
 
@@ -410,7 +411,7 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 - **Volume** (§5.2): two-phase lifecycle (geometry first, slices streamed), slice writes, slice-loaded query.
 - **Camera** (§8): orthographic camera (`normal`, `up`, `focalPoint`, `zoom`), `axial` / `coronal` / `sagittal` / `acquisition` presets, synchronous world↔canvas transforms, slab scroll along `normal`.
 - **Viewport** (§9): one canvas + one volume, window/level, blend mode, slab thickness, voxel sampling.
-- **RenderingEngine** (§10): singleton module accessor + one-time async init, `createVolume` / `createViewport`, and a `requestAnimationFrame` loop that uploads dirty bricks and redraws dirty viewports.
+- **RenderingEngine** (§10): singleton module accessor + one-time async init, `createVolume` / `createViewport`, volume and viewport destruction (a volume referenced by a live viewport is rejected), full engine teardown (stops the loop, releases resources, destroys the renderer, resets the singleton), and a `requestAnimationFrame` loop that uploads dirty bricks and redraws dirty viewports.
 - **GPURenderer** (§7, §14): WebGPU orthographic slab raycast in WGSL, one canvas context per viewport, per-brick texture upload.
 - **Blend modes** (§7.3): MIP, MinIP, Average. Composite is a basic front-to-back accumulation (grayscale used as opacity).
 

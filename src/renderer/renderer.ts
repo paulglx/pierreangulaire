@@ -7,6 +7,8 @@ export interface Renderer {
   resizeViewport(viewport: Viewport): void;
   destroyViewport(id: string): void;
   onVolumeCreated(volume: Volume): void;
+  onVolumeDestroyed(id: string): void;
   uploadBricks(volume: Volume, brickIndices: number[]): void;
   render(viewports: readonly Viewport[]): void;
+  destroy(): void;
 }

@@ -25,14 +25,18 @@ export class RenderingEngine {
   private readonly volumes = new Map<string, Volume>();
   private readonly viewports = new Map<string, Viewport>();
   private nextId = 0;
+  private rafHandle: number | null = null;
+  private destroyed = false;
 
   private constructor(renderer: Renderer, brickSize: number) {
     this.renderer = renderer;
     this.brickSize = brickSize;
   }
 
-  static async create(options: RenderingEngineOptions): Promise<RenderingEngine> {
-    const renderer = new GPURenderer();
+  static async create(
+    options: RenderingEngineOptions,
+    renderer: Renderer = new GPURenderer(),
+  ): Promise<RenderingEngine> {
     await renderer.initialize();
     const engine = new RenderingEngine(renderer, options.brickSize ?? DEFAULT_BRICK_SIZE);
     engine.startLoop();
@@ -49,6 +53,19 @@ export class RenderingEngine {
 
   getVolume(id: string): Volume | undefined {
     return this.volumes.get(id);
+  }
+
+  destroyVolume(id: string): void {
+    if (!this.volumes.has(id)) return;
+    for (const viewport of this.viewports.values()) {
+      if (viewport.volume.id === id) {
+        throw new Error(
+          `Cannot destroy volume ${id}: viewport ${viewport.id} still references it. Destroy the viewport first.`,
+        );
+      }
+    }
+    this.volumes.delete(id);
+    this.renderer.onVolumeDestroyed(id);
   }
 
   createViewport(options: CreateViewportOptions): Viewport {
@@ -101,13 +118,30 @@ export class RenderingEngine {
     }
   }
 
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    if (this.rafHandle !== null) {
+      cancelAnimationFrame(this.rafHandle);
+      this.rafHandle = null;
+    }
+    this.viewports.clear();
+    this.volumes.clear();
+    this.renderer.destroy();
+    if (instance === this) {
+      instance = null;
+      pending = null;
+    }
+  }
+
   private startLoop(): void {
     const frame = (): void => {
+      if (this.destroyed) return;
       this.uploadDirtyBricks();
       this.render();
-      requestAnimationFrame(frame);
+      this.rafHandle = requestAnimationFrame(frame);
     };
-    requestAnimationFrame(frame);
+    this.rafHandle = requestAnimationFrame(frame);
   }
 
   private ensureCanvasSize(canvas: HTMLCanvasElement): void {
