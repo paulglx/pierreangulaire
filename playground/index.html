@@ -1,157 +1,50 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="h-full scheme-dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>pierreangulaire · playground</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        --page: #0a0a0a;
-        --text: #c8c8c8;
-        --muted: #808080;
-      }
-      * {
-        box-sizing: border-box;
-      }
-      html,
-      body {
-        margin: 0;
-        height: 100%;
-      }
-      body {
-        background: var(--page);
-        color: var(--text);
-        font:
-          13px/1.4 system-ui,
-          sans-serif;
-        display: flex;
-        flex-direction: column;
-      }
-      header {
-        display: flex;
-        align-items: center;
-        gap: 18px;
-        padding: 12px 16px;
-      }
-      header h1 {
-        font-size: 13px;
-        font-weight: 400;
-        margin: 0;
-        color: var(--muted);
-      }
-      label.action {
-        cursor: pointer;
-        color: var(--text);
-      }
-      label.action:hover {
-        text-decoration: underline;
-      }
-      label.action input {
-        display: none;
-      }
-      button.toggle {
-        font: inherit;
-        background: transparent;
-        border: 1px solid var(--muted);
-        color: var(--text);
-        border-radius: 4px;
-        padding: 3px 8px;
-        cursor: pointer;
-      }
-      button.toggle:hover {
-        border-color: var(--text);
-      }
-      button.toggle.on {
-        background: var(--text);
-        color: var(--page);
-        border-color: var(--text);
-      }
-      #status {
-        color: var(--muted);
-        margin-left: auto;
-        font-variant-numeric: tabular-nums;
-      }
-      main {
-        flex: 1;
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 6px;
-        padding: 6px;
-        min-height: 0;
-      }
-      .viewport {
-        position: relative;
-        background: #000;
-        overflow: hidden;
-        min-height: 0;
-      }
-      .viewport canvas {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        display: block;
-      }
-      .viewport .tag {
-        position: absolute;
-        top: 8px;
-        left: 10px;
-        font-size: 11px;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--muted);
-        pointer-events: none;
-      }
-      .controls {
-        position: absolute;
-        left: 10px;
-        bottom: 10px;
-        display: grid;
-        grid-template-columns: auto 90px 38px;
-        gap: 3px 8px;
-        align-items: center;
-        font-size: 10px;
-        text-shadow: 0 1px 2px #000;
-      }
-      .controls label {
-        display: contents;
-      }
-      .controls .name {
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-      }
-      .controls .val {
-        font-variant-numeric: tabular-nums;
-        text-align: right;
-      }
-      .controls input[type='range'] {
-        width: 90px;
-        height: 10px;
-        margin: 0;
-        accent-color: #9a9a9a;
-      }
-    </style>
   </head>
-  <body>
-    <header>
-      <h1>pierreangulaire · playground</h1>
-      <label class="action">
+  <body class="flex h-full flex-col bg-stone-950 font-mono text-xs leading-snug text-stone-50">
+    <header class="flex items-center gap-4 px-4 py-3">
+      <h1 class="m-0 font-normal text-stone-400">pierreangulaire · playground</h1>
+      <label class="cursor-pointer hover:underline">
         Open DICOM folder
-        <input id="folder" type="file" webkitdirectory multiple />
+        <input id="folder" class="hidden" type="file" webkitdirectory multiple />
       </label>
-      <label class="action">
+      <label class="cursor-pointer hover:underline">
         Open files
-        <input id="files" type="file" multiple />
+        <input id="files" class="hidden" type="file" multiple />
       </label>
-      <button id="kebab" class="toggle" type="button">Kebab mode: off</button>
-      <div id="status">Select a folder of DICOM files representing one volume.</div>
+      <button id="kebab" class="cursor-pointer text-stone-400 hover:underline" type="button">
+        Kebab mode: off
+      </button>
+      <div id="status" class="ml-auto text-stone-400 tabular-nums">
+        Select a folder of DICOM files representing one volume.
+      </div>
     </header>
-    <main>
-      <div class="viewport"><span class="tag">Axial</span><canvas id="axial"></canvas></div>
-      <div class="viewport"><span class="tag">Coronal</span><canvas id="coronal"></canvas></div>
-      <div class="viewport"><span class="tag">Sagittal</span><canvas id="sagittal"></canvas></div>
+    <main class="grid min-h-0 flex-1 grid-cols-3 gap-1.5 p-1.5">
+      <div class="relative min-h-0 overflow-hidden bg-black">
+        <span
+          class="pointer-events-none absolute top-2 left-2.5 tracking-widest text-stone-400 uppercase"
+          >Axial</span
+        >
+        <canvas id="axial" class="absolute inset-0 block h-full w-full"></canvas>
+      </div>
+      <div class="relative min-h-0 overflow-hidden bg-black">
+        <span
+          class="pointer-events-none absolute top-2 left-2.5 tracking-widest text-stone-400 uppercase"
+          >Coronal</span
+        >
+        <canvas id="coronal" class="absolute inset-0 block h-full w-full"></canvas>
+      </div>
+      <div class="relative min-h-0 overflow-hidden bg-black">
+        <span
+          class="pointer-events-none absolute top-2 left-2.5 tracking-widest text-stone-400 uppercase"
+          >Sagittal</span
+        >
+        <canvas id="sagittal" class="absolute inset-0 block h-full w-full"></canvas>
+      </div>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

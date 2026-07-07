@@ -8,6 +8,7 @@ import {
   volumeCenter,
 } from 'pierreangulaire';
 import { type LoadedSeries, loadSeries } from './dicom';
+import './style.css';
 
 const statusEl = document.querySelector<HTMLDivElement>('#status')!;
 const folderInput = document.querySelector<HTMLInputElement>('#folder')!;
@@ -55,7 +56,8 @@ function kebabFrame(now: number): void {
 function setKebab(enabled: boolean): void {
   kebabEnabled = enabled;
   kebabButton.textContent = `Kebab mode: ${enabled ? 'on' : 'off'}`;
-  kebabButton.classList.toggle('on', enabled);
+  kebabButton.classList.toggle('text-stone-50', enabled);
+  kebabButton.classList.toggle('text-stone-400', !enabled);
   if (enabled) {
     kebabLast = 0;
     kebabRaf = requestAnimationFrame(kebabFrame);
@@ -124,20 +126,22 @@ interface SliderSpec {
 
 function addSlider(controls: HTMLElement, viewport: Viewport, spec: SliderSpec): void {
   const label = document.createElement('label');
+  label.className = 'flex items-center gap-2';
 
   const name = document.createElement('span');
-  name.className = 'name';
+  name.className = 'w-20 text-stone-400 uppercase tracking-wider';
   name.textContent = spec.name;
 
   const input = document.createElement('input');
   input.type = 'range';
+  input.className = 'm-0 h-2.5 w-24 accent-stone-400';
   input.min = String(spec.min);
   input.max = String(spec.max);
   input.step = String(spec.step);
   input.value = String(spec.value);
 
   const value = document.createElement('span');
-  value.className = 'val';
+  value.className = 'w-24 text-right tabular-nums';
   value.textContent = spec.format(spec.value);
 
   input.addEventListener('input', () => {
@@ -153,9 +157,10 @@ function addSlider(controls: HTMLElement, viewport: Viewport, spec: SliderSpec):
 
 function buildControls(viewport: Viewport, volume: Volume, series: LoadedSeries): void {
   const panel = viewport.canvas.parentElement!;
-  panel.querySelector('.controls')?.remove();
+  panel.querySelector('[data-controls]')?.remove();
   const controls = document.createElement('div');
-  controls.className = 'controls';
+  controls.dataset.controls = '';
+  controls.className = 'absolute bottom-2.5 left-2.5 flex flex-col gap-1 text-shadow-sm';
 
   const center = volumeCenter(volume.geometry);
   const normal = viewport.camera.normal;

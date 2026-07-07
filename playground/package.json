@@ -8,11 +8,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.2.7",
     "dicom-parser": "^1.8.21",
     "pierreangulaire": "workspace:*"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.2",
     "@types/node": "^26.0.1",
+    "tailwindcss": "^4.3.2",
     "vite": "^8.1.1"
   }
 }
