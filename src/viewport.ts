@@ -14,6 +14,7 @@ export class Viewport {
   blendMode: BlendMode;
   slabThickness: number;
   segmentationVisible = true;
+  segmentationAntialiasing = true;
   dirty = true;
 
   constructor(id: string, canvas: HTMLCanvasElement, volume: Volume, camera: Camera) {
@@ -47,6 +48,11 @@ export class Viewport {
 
   setSlabThickness(thicknessMm: number): void {
     this.slabThickness = thicknessMm;
+    this.dirty = true;
+  }
+
+  setSegmentationAntialiasing(enabled: boolean): void {
+    this.segmentationAntialiasing = enabled;
     this.dirty = true;
   }
 

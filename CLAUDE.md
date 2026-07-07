@@ -2,3 +2,4 @@
 - Every modification to the library must be reflected in SPECS.md.
 - Don't write comments. If code is hard to decypher, make it easier to read.
 - Only use stock scale values in Tailwind.
+- Never try to test rendering yourself. Always prompt the user to go try.

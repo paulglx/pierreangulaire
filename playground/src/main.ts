@@ -15,7 +15,9 @@ import './style.css';
 const statusEl = document.querySelector<HTMLDivElement>('#status')!;
 const folderInput = document.querySelector<HTMLInputElement>('#folder')!;
 const kebabButton = document.querySelector<HTMLButtonElement>('#kebab')!;
+const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
 const sphereButton = document.querySelector<HTMLButtonElement>('#sphere')!;
+const antialiasButton = document.querySelector<HTMLButtonElement>('#antialiasing')!;
 
 const KEBAB_RAD_PER_SEC = (2 * Math.PI) / 24;
 
@@ -27,16 +29,17 @@ const PANELS: { id: string; orientation: Orientation }[] = [
 
 const BLEND_NAMES = ['MIP', 'MinIP', 'Average', 'Composite'];
 
-let activeViewportIds: string[] = [];
-let activeVolume: Volume | null = null;
-
-interface KebabEntry {
+interface ActiveViewport {
   viewport: Viewport;
+  orientation: Orientation;
   baseNormal: Vec3;
   baseUp: Vec3;
 }
 
-let kebabEntries: KebabEntry[] = [];
+let activeViewports: ActiveViewport[] = [];
+let activeVolume: Volume | null = null;
+let antialiasEnabled = true;
+
 let kebabEnabled = false;
 let kebabRaf = 0;
 let kebabAngle = 0;
@@ -48,10 +51,11 @@ function kebabFrame(now: number): void {
     kebabAngle += ((now - kebabLast) / 1000) * KEBAB_RAD_PER_SEC;
   }
   kebabLast = now;
-  for (const { viewport, baseNormal, baseUp } of kebabEntries) {
+  for (const { viewport, baseNormal, baseUp } of activeViewports) {
     viewport.camera.normal = rotateAroundAxis(baseNormal, baseUp, kebabAngle);
     viewport.markDirty();
   }
+  syncResetButton();
   kebabRaf = requestAnimationFrame(kebabFrame);
 }
 
@@ -66,6 +70,36 @@ function setKebab(enabled: boolean): void {
   } else {
     cancelAnimationFrame(kebabRaf);
   }
+}
+
+function vec3Near(a: Vec3, b: Vec3): boolean {
+  return (
+    Math.abs(a[0] - b[0]) < 1e-4 && Math.abs(a[1] - b[1]) < 1e-4 && Math.abs(a[2] - b[2]) < 1e-4
+  );
+}
+
+function orientationAligned({ viewport, baseNormal, baseUp }: ActiveViewport): boolean {
+  const { normal, up } = viewport.camera;
+  return vec3Near(normal, baseNormal) && vec3Near(up, baseUp);
+}
+
+function syncResetButton(): void {
+  const misaligned = activeViewports.some((entry) => !orientationAligned(entry));
+  resetButton.classList.toggle('hidden', !misaligned);
+}
+
+function resetOrientation(): void {
+  setKebab(false);
+  const misaligned = activeViewports.filter((entry) => !orientationAligned(entry));
+  for (const entry of misaligned) {
+    entry.viewport.camera.normal = entry.baseNormal;
+    entry.viewport.camera.up = entry.baseUp;
+    entry.viewport.markDirty();
+  }
+  if (misaligned.length > 0) {
+    setStatus(`Reset orientation — ${misaligned.map((entry) => entry.orientation).join(', ')}.`);
+  }
+  syncResetButton();
 }
 
 function setStatus(message: string): void {
@@ -271,13 +305,12 @@ async function open(files: File[]): Promise<void> {
     return;
   }
 
-  for (const id of activeViewportIds) engine.destroyViewport(id);
-  activeViewportIds = [];
+  for (const { viewport } of activeViewports) engine.destroyViewport(viewport.id);
+  activeViewports = [];
   if (activeVolume) {
     engine.destroyVolume(activeVolume.id);
     activeVolume = null;
   }
-  kebabEntries = [];
   kebabAngle = 0;
   kebabLast = 0;
 
@@ -294,10 +327,11 @@ async function open(files: File[]): Promise<void> {
       orientation: panel.orientation,
     });
     viewport.setWindowLevel({ center: series.windowCenter, width: series.windowWidth });
+    viewport.setSegmentationAntialiasing(antialiasEnabled);
     buildControls(viewport, volume, series);
-    activeViewportIds.push(panel.id);
-    kebabEntries.push({
+    activeViewports.push({
       viewport,
+      orientation: panel.orientation,
       baseNormal: viewport.camera.normal,
       baseUp: viewport.camera.up,
     });
@@ -308,6 +342,7 @@ async function open(files: File[]): Promise<void> {
     });
     observer.observe(canvas);
   }
+  syncResetButton();
 
   await streamSlices(volume, series.slices);
   setStatus(`${series.description} — ${dx}×${dy}×${dz}`);
@@ -331,10 +366,20 @@ function addSphereSegment(): void {
   setStatus(`Added segment ${segment} — sphere r=${radius.toFixed(1)}mm`);
 }
 
+function setAntialiasing(enabled: boolean): void {
+  antialiasEnabled = enabled;
+  antialiasButton.textContent = `Antialiasing: ${enabled ? 'on' : 'off'}`;
+  antialiasButton.classList.toggle('text-stone-50', enabled);
+  antialiasButton.classList.toggle('text-stone-400', !enabled);
+  for (const { viewport } of activeViewports) viewport.setSegmentationAntialiasing(enabled);
+}
+
 function filesFrom(input: HTMLInputElement): File[] {
   return input.files ? [...input.files] : [];
 }
 
 folderInput.addEventListener('change', () => void open(filesFrom(folderInput)));
 kebabButton.addEventListener('click', () => setKebab(!kebabEnabled));
+resetButton.addEventListener('click', resetOrientation);
 sphereButton.addEventListener('click', addSphereSegment);
+antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnabled));

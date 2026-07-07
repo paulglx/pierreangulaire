@@ -17,9 +17,9 @@ struct Uniforms {
   origin: vec3<f32>,
   segEnabled: f32,
   spacing: vec3<f32>,
-  pad0: f32,
+  segAntialias: f32,
   dims: vec3<f32>,
-  pad1: f32,
+  pixelVoxels: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
@@ -81,6 +81,11 @@ fn sampleTrilinear(q: vec3<f32>) -> f32 {
 }
 
 const BORDER_ALPHA = 0.9;
+const SEG_ISO = 0.5;
+const SEG_ISO_INNER = 0.82;
+const SEG_BORDER_WIDTH = 3.0;
+const SEG_KERNEL: i32 = 3;
+const SEG_SUPPORT = 3.5;
 
 fn worldDirToIndex(v: vec3<f32>) -> vec3<f32> {
   return vec3<f32>(
@@ -102,6 +107,11 @@ fn slotsAt(q: vec3<f32>) -> vec4<u32> {
   return textureLoad(segmentation, c, 0);
 }
 
+fn loadSlotsAt(c: vec3<i32>) -> vec4<u32> {
+  let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
+  return textureLoad(segmentation, clamp(c, vec3<i32>(0), maxIndex), 0);
+}
+
 fn containsSegment(slots: vec4<u32>, segment: u32) -> bool {
   return any(slots == vec4<u32>(segment));
 }
@@ -111,10 +121,12 @@ fn sampleSegmentation(q: vec3<f32>, rightStep: vec3<f32>, upStep: vec3<f32>) -> 
   if (all(slots == vec4<u32>(0u))) {
     return vec4<f32>(0.0);
   }
-  let nl = slotsAt(q - rightStep);
-  let nr = slotsAt(q + rightStep);
-  let nd = slotsAt(q - upStep);
-  let nu = slotsAt(q + upStep);
+  let borderRight = rightStep * SEG_BORDER_WIDTH;
+  let borderUp = upStep * SEG_BORDER_WIDTH;
+  let nl = slotsAt(q - borderRight);
+  let nr = slotsAt(q + borderRight);
+  let nd = slotsAt(q - borderUp);
+  let nu = slotsAt(q + borderUp);
   var color = vec3<f32>(0.0);
   var alpha = 0.0;
   for (var s = 0u; s < 4u; s = s + 1u) {
@@ -132,6 +144,83 @@ fn sampleSegmentation(q: vec3<f32>, rightStep: vec3<f32>, upStep: vec3<f32>) -> 
     if (!interior) {
       a = max(a, BORDER_ALPHA);
     }
+    color = color + style.rgb * a;
+    alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
+  }
+  return vec4<f32>(min(color, vec3<f32>(1.0)), alpha);
+}
+
+fn sampleSegmentationAntialiased(q: vec3<f32>, rightStep: vec3<f32>, upStep: vec3<f32>) -> vec4<f32> {
+  let gateRight = rightStep * f32(SEG_KERNEL);
+  let gateUp = upStep * f32(SEG_KERNEL);
+  if (all(slotsAt(q) == vec4<u32>(0u))
+    && all(slotsAt(q - gateRight) == vec4<u32>(0u)) && all(slotsAt(q + gateRight) == vec4<u32>(0u))
+    && all(slotsAt(q - gateUp) == vec4<u32>(0u)) && all(slotsAt(q + gateUp) == vec4<u32>(0u))) {
+    return vec4<f32>(0.0);
+  }
+
+  var seen: array<u32, 16>;
+  var cov: array<f32, 16>;
+  var seenCount = 0u;
+  var weightSum = 0.0;
+  let center = vec3<i32>(round(q));
+  for (var dz = -SEG_KERNEL; dz <= SEG_KERNEL; dz = dz + 1) {
+    for (var dy = -SEG_KERNEL; dy <= SEG_KERNEL; dy = dy + 1) {
+      for (var dx = -SEG_KERNEL; dx <= SEG_KERNEL; dx = dx + 1) {
+        let v = center + vec3<i32>(dx, dy, dz);
+        let r = q - vec3<f32>(v);
+        let t = dot(r, r) / (SEG_SUPPORT * SEG_SUPPORT);
+        if (t >= 1.0) {
+          continue;
+        }
+        let edge = 1.0 - t;
+        let weight = edge * edge;
+        weightSum = weightSum + weight;
+        let slots = loadSlotsAt(v);
+        for (var s = 0u; s < 4u; s = s + 1u) {
+          let segment = slots[s];
+          if (segment == 0u) {
+            continue;
+          }
+          var idx = seenCount;
+          for (var p = 0u; p < seenCount; p = p + 1u) {
+            if (seen[p] == segment) {
+              idx = p;
+            }
+          }
+          if (idx == seenCount) {
+            if (seenCount >= 16u) {
+              continue;
+            }
+            seen[seenCount] = segment;
+            cov[seenCount] = 0.0;
+            seenCount = seenCount + 1u;
+          }
+          cov[idx] = cov[idx] + weight;
+        }
+      }
+    }
+  }
+  if (weightSum <= 0.0) {
+    return vec4<f32>(0.0);
+  }
+
+  let halfBand = clamp(0.6 * U.pixelVoxels / SEG_SUPPORT, 0.01, 0.15);
+  var color = vec3<f32>(0.0);
+  var alpha = 0.0;
+  for (var i = 0u; i < seenCount; i = i + 1u) {
+    let segment = seen[i];
+    let style = labels[segment];
+    if (style.a == 0.0) {
+      continue;
+    }
+    let c = cov[i] / weightSum;
+    let outer = smoothstep(SEG_ISO - halfBand, SEG_ISO + halfBand, c);
+    if (outer <= 0.0) {
+      continue;
+    }
+    let inner = smoothstep(SEG_ISO_INNER - halfBand, SEG_ISO_INNER + halfBand, c);
+    let a = inner * style.a + max(outer - inner, 0.0) * BORDER_ALPHA;
     color = color + style.rgb * a;
     alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
   }
@@ -183,7 +272,12 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
     compositeColor = compositeColor + (1.0 - compositeAlpha) * gray * gray;
     compositeAlpha = compositeAlpha + (1.0 - compositeAlpha) * gray;
     if (U.segEnabled > 0.5) {
-      let seg = sampleSegmentation(q, rightStep, upStep);
+      var seg = vec4<f32>(0.0);
+      if (U.segAntialias > 0.5) {
+        seg = sampleSegmentationAntialiased(q, rightStep, upStep);
+      } else {
+        seg = sampleSegmentation(q, rightStep, upStep);
+      }
       segColor = segColor + (1.0 - segAlpha) * seg.rgb;
       segAlpha = segAlpha + (1.0 - segAlpha) * seg.a;
     }

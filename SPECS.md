@@ -162,9 +162,11 @@ A 256-entry table holds per-segment style — color (rgb), fill opacity, and vis
 
 ### 6.3 Compositing rule
 
-At each sample, **every visible segment** in the voxel's slot set contributes. A segment renders as a **quasi-opaque border with a transparent fill**: a voxel on the segment's boundary in the view plane (any in-plane neighbor lacking the segment) contributes at near-full opacity (α ≈ 0.9), interior voxels at the segment's label opacity. Segments blend **additively**: each contributing segment adds its premultiplied color (`color × α`), the summed color is clamped, and coverage accumulates as `1 − Π(1 − αₛ)`. Where segments overlap the sums brighten and shift hue, so overlap is directly visible. The combined color is blended over the grayscale sample by the accumulated coverage; a voxel whose segments are all hidden (or empty) contributes nothing.
+At each sample, **every visible segment** in the voxel's slot set contributes. A segment renders as a **quasi-opaque border with a transparent fill**: a voxel within the border width of the segment's boundary in the view plane (an in-plane neighbor at that distance lacking the segment) contributes at near-full opacity (α ≈ 0.9), interior voxels at the segment's label opacity. The border width is a fixed number of voxels (default 3). Segments blend **additively**: each contributing segment adds its premultiplied color (`color × α`), the summed color is clamped, and coverage accumulates as `1 − Π(1 − αₛ)`. Where segments overlap the sums brighten and shift hue, so overlap is directly visible. The combined color is blended over the grayscale sample by the accumulated coverage; a voxel whose segments are all hidden (or empty) contributes nothing.
 
 Full storage of the slot set (rather than a precomputed composite) is what allows a segment to be erased or hidden and the remaining segments to keep rendering. The compositing function is isolated, so it's easy to replace later.
+
+**Antialiasing** is a per-viewport toggle (default on, §9). With it off, membership is the point-sampled slot set and both the silhouette and the border follow the voxel grid. With it on, each segment's coverage is computed by **low-pass filtering its membership with a compact, smooth kernel wider than a voxel**; the smooth coverage in `[0, 1]` then drives **both** boundaries of the drawn segment as isocontours, so neither follows the voxel grid — at the cost of slightly rounding sub-voxel features. The outer silhouette is the coverage `0.5` contour (segment vs. background); the inner edge of the quasi-opaque outline is a **higher isocontour** (a fixed step deeper in coverage), which sits a roughly constant distance inside the boundary. Because both edges are `smoothstep` transitions of the same continuous coverage field, the border is anti-aliased on its outer _and_ inner edge, not just its silhouette. The kernel is **anchored to the voxel grid** (centred on the nearest voxel) and weights each voxel by a smooth function of its continuous distance to the sample point that falls to zero at the window edge; this makes the coverage field continuous as the sample point moves across the screen, which is what actually removes the staircase — sampling the mask at fixed offsets and rounding would instead yield a piecewise-constant field that still steps. The transition width of each contour tracks the on-screen pixel footprint, so edges stay roughly one pixel wide (crisp, not blurry) at any zoom. In this mode the outline width is set by the gap between the two isocontours rather than a fixed voxel count. Antialiasing changes only appearance, never the stored slot sets, and it costs extra texture fetches per sample, so it can be toggled off.
 
 ### 6.4 Editing
 
@@ -246,6 +248,7 @@ A viewport is bound to one canvas and one image volume, and exposes:
 
 - A camera (§8).
 - Visibility toggle for the volume's built-in segmentation.
+- Antialiasing toggle for the segmentation (§6.3).
 - Window/level, blend mode, and slab thickness.
 - Synchronous world↔canvas coordinate transforms (computed TS-side).
 - On-demand single-voxel sampling (reads the CPU-resident brick store).
@@ -391,8 +394,9 @@ The published artifact is `dist/` (`index.js` + `index.d.ts`); only `src/` is sh
 | Segmentation overlap depth (K) | 4 (`rgba8uint`)                                                     |
 | Distinct segment indices       | 256 (1–255; 0 = empty)                                              |
 | Overlap compositing            | Additive — every visible segment contributes                        |
-| Segment border                 | Quasi-opaque (α ≈ 0.9), one voxel, in the view plane                |
+| Segment border                 | Quasi-opaque (α ≈ 0.9), 3 voxels wide, in the view plane            |
 | Segment fill opacity           | 0.2 (per-segment, from the label table)                             |
+| Segmentation antialiasing      | On (per-viewport, toggleable)                                       |
 | Slot overflow policy           | Evict lowest index                                                  |
 | Segmentation sampling          | Nearest (point)                                                     |
 | Segmentation visibility        | Visible (per viewport, toggleable)                                  |
@@ -418,7 +422,7 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 - **GPURenderer** (§7, §14): WebGPU orthographic slab raycast in WGSL, one canvas context per viewport, per-brick texture upload.
 - **Blend modes** (§7.3): MIP, MinIP, Average. Composite is a basic front-to-back accumulation (grayscale used as opacity).
 - **Segmentation** (§6.1–6.2): built-in 1:1 segmentation per volume with K=4 slot sets, sphere paint writes with slot-overflow eviction (lowest index), present-segment listing, a 256-entry label table (color / opacity / visibility, versioned), and dirty-brick sync through the renderer contract.
-- **Segmentation rendering** (§6.3): point-sampled slot sets composited in the raycast shader — quasi-opaque border where an in-plane neighbor lacks the segment, transparent fill inside, every visible segment blended additively, accumulated front-to-back along the slab and blended over the grayscale sample — with a per-viewport visibility toggle.
+- **Segmentation rendering** (§6.3): point-sampled slot sets composited in the raycast shader — quasi-opaque border (3 voxels wide) where an in-plane neighbor lacks the segment, transparent fill inside, every visible segment blended additively, accumulated front-to-back along the slab and blended over the grayscale sample — with per-viewport visibility and antialiasing toggles (antialiasing derives a smooth silhouette and outline from a grid-anchored, continuous blurred coverage field with a screen-space-adaptive edge, on by default).
 
 ### 18.2 Simplifications
 

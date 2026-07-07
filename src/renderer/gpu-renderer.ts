@@ -1,3 +1,4 @@
+import { dot } from '../math';
 import type { Segmentation } from '../segmentation';
 import type { Viewport } from '../viewport';
 import type { Volume } from '../volume';
@@ -243,7 +244,7 @@ export class GPURenderer implements Renderer {
       }
 
       const segEnabled = viewport.segmentationVisible && volumeResource.segTexture !== null;
-      writeUniforms(resource.uniformData, viewport, segEnabled);
+      writeUniforms(resource.uniformData, viewport, segEnabled, viewport.segmentationAntialiasing);
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
 
       const pass = encoder.beginRenderPass({
@@ -294,7 +295,12 @@ function labelData(segmentation: Segmentation): Float32Array {
   return data;
 }
 
-function writeUniforms(arr: Float32Array, viewport: Viewport, segEnabled: boolean): void {
+function writeUniforms(
+  arr: Float32Array,
+  viewport: Viewport,
+  segEnabled: boolean,
+  segAntialias: boolean,
+): void {
   const camera = viewport.camera;
   const { right, trueUp, normal } = camera.basis();
   const geometry = viewport.volume.geometry;
@@ -344,7 +350,16 @@ function writeUniforms(arr: Float32Array, viewport: Viewport, segEnabled: boolea
   arr[32] = spacing[0];
   arr[33] = spacing[1];
   arr[34] = spacing[2];
+  arr[35] = segAntialias ? 1 : 0;
   arr[36] = dims[0];
   arr[37] = dims[1];
   arr[38] = dims[2];
+
+  const voxelsPerWorld = Math.hypot(
+    dot(right, direction[0]) / spacing[0],
+    dot(right, direction[1]) / spacing[1],
+    dot(right, direction[2]) / spacing[2],
+  );
+  const worldPerPixel = (2 * halfHeight) / viewport.canvas.height;
+  arr[39] = worldPerPixel * voxelsPerWorld;
 }
