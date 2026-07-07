@@ -1,11 +1,13 @@
 import {
   type BlendMode,
+  indexToWorld,
   initRenderingEngine,
   type Orientation,
   type Vec3,
   type Viewport,
   type Volume,
   volumeCenter,
+  worldExtent,
 } from 'pierreangulaire';
 import { type LoadedSeries, loadSeries } from './dicom';
 import './style.css';
@@ -13,6 +15,7 @@ import './style.css';
 const statusEl = document.querySelector<HTMLDivElement>('#status')!;
 const folderInput = document.querySelector<HTMLInputElement>('#folder')!;
 const kebabButton = document.querySelector<HTMLButtonElement>('#kebab')!;
+const sphereButton = document.querySelector<HTMLButtonElement>('#sphere')!;
 
 const KEBAB_RAD_PER_SEC = (2 * Math.PI) / 24;
 
@@ -310,9 +313,28 @@ async function open(files: File[]): Promise<void> {
   setStatus(`${series.description} — ${dx}×${dy}×${dz}`);
 }
 
+function addSphereSegment(): void {
+  if (!activeVolume) {
+    setStatus('Open a volume before adding segments.');
+    return;
+  }
+  const segmentation = activeVolume.segmentation;
+  const segment = Math.min(255, (segmentation.segmentsPresent().at(-1) ?? 0) + 1);
+  const { dims } = activeVolume.geometry;
+  const center = indexToWorld(activeVolume.geometry, [
+    dims[0] * (0.2 + Math.random() * 0.6),
+    dims[1] * (0.2 + Math.random() * 0.6),
+    dims[2] * (0.2 + Math.random() * 0.6),
+  ]);
+  const radius = Math.min(...worldExtent(activeVolume.geometry)) * (0.05 + Math.random() * 0.1);
+  segmentation.paintSphere(center, radius, segment);
+  setStatus(`Added segment ${segment} — sphere r=${radius.toFixed(1)}mm`);
+}
+
 function filesFrom(input: HTMLInputElement): File[] {
   return input.files ? [...input.files] : [];
 }
 
 folderInput.addEventListener('change', () => void open(filesFrom(folderInput)));
 kebabButton.addEventListener('click', () => setKebab(!kebabEnabled));
+sphereButton.addEventListener('click', addSphereSegment);
