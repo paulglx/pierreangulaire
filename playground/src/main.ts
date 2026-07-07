@@ -25,6 +25,7 @@ const PANELS: { id: string; orientation: Orientation }[] = [
 const BLEND_NAMES = ['MIP', 'MinIP', 'Average', 'Composite'];
 
 let activeViewportIds: string[] = [];
+let activeVolume: Volume | null = null;
 
 interface KebabEntry {
   viewport: Viewport;
@@ -265,11 +266,16 @@ async function open(files: File[]): Promise<void> {
 
   for (const id of activeViewportIds) engine.destroyViewport(id);
   activeViewportIds = [];
+  if (activeVolume) {
+    engine.destroyVolume(activeVolume.id);
+    activeVolume = null;
+  }
   kebabEntries = [];
   kebabAngle = 0;
   kebabLast = 0;
 
   const volume = engine.createVolume(series.geometry, series.format);
+  activeVolume = volume;
   const [dx, dy, dz] = series.geometry.dims;
 
   for (const panel of PANELS) {
