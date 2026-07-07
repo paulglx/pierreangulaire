@@ -12,7 +12,6 @@ import './style.css';
 
 const statusEl = document.querySelector<HTMLDivElement>('#status')!;
 const folderInput = document.querySelector<HTMLInputElement>('#folder')!;
-const filesInput = document.querySelector<HTMLInputElement>('#files')!;
 const kebabButton = document.querySelector<HTMLButtonElement>('#kebab')!;
 
 const KEBAB_RAD_PER_SEC = (2 * Math.PI) / 24;
@@ -316,5 +315,4 @@ function filesFrom(input: HTMLInputElement): File[] {
 }
 
 folderInput.addEventListener('change', () => void open(filesFrom(folderInput)));
-filesInput.addEventListener('change', () => void open(filesFrom(filesInput)));
 kebabButton.addEventListener('click', () => setKebab(!kebabEnabled));
