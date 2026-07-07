@@ -25,6 +25,7 @@ function fakeRenderer() {
     onVolumeCreated: vi.fn((_volume: Volume) => {}),
     onVolumeDestroyed: vi.fn((_id: string) => {}),
     uploadBricks: vi.fn((_volume: Volume, _brickIndices: number[]) => {}),
+    uploadSegmentationBricks: vi.fn((_volume: Volume, _brickIndices: number[]) => {}),
     render: vi.fn((_viewports: readonly Viewport[]) => {}),
     destroy: vi.fn(() => {}),
   } satisfies Renderer;
@@ -35,11 +36,16 @@ function fakeCanvas(): HTMLCanvasElement {
 }
 
 let cancelled: number[];
+let frames: FrameRequestCallback[];
 
 beforeEach(() => {
   cancelled = [];
+  frames = [];
   let handle = 0;
-  vi.stubGlobal('requestAnimationFrame', () => ++handle);
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frames.push(callback);
+    return ++handle;
+  });
   vi.stubGlobal('cancelAnimationFrame', (id: number) => cancelled.push(id));
 });
 
@@ -80,6 +86,21 @@ test('destroyVolume refuses while a viewport still references the volume', async
   engine.destroyViewport('vp');
   engine.destroyVolume(volume.id);
   expect(renderer.onVolumeDestroyed).toHaveBeenCalledWith(volume.id);
+});
+
+test('segmentation edits upload dirty bricks and re-render the viewports', async () => {
+  const renderer = fakeRenderer();
+  const engine = await RenderingEngine.create({}, renderer);
+  const volume = engine.createVolume(geometry, 'int16');
+  const viewport = engine.createViewport({ id: 'vp', canvas: fakeCanvas(), volume });
+  viewport.dirty = false;
+
+  volume.segmentation.paintSphere([4, 4, 4], 2, 1);
+  frames.at(-1)!(0);
+
+  expect(renderer.uploadSegmentationBricks).toHaveBeenCalledWith(volume, [0]);
+  expect(renderer.uploadBricks).not.toHaveBeenCalled();
+  expect(renderer.render).toHaveBeenCalledWith([viewport]);
 });
 
 test('destroy stops the loop, tears down the renderer, and clears state', async () => {
