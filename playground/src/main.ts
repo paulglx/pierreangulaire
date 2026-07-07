@@ -348,22 +348,31 @@ async function open(files: File[]): Promise<void> {
   setStatus(`${series.description} — ${dx}×${dy}×${dz}`);
 }
 
-function addSphereSegment(): void {
-  if (!activeVolume) {
-    setStatus('Open a volume before adding segments.');
-    return;
-  }
-  const segmentation = activeVolume.segmentation;
+function paintRandomSphere(volume: Volume): { segment: number; radius: number } {
+  const segmentation = volume.segmentation;
   const segment = Math.min(255, (segmentation.segmentsPresent().at(-1) ?? 0) + 1);
-  const { dims } = activeVolume.geometry;
-  const center = indexToWorld(activeVolume.geometry, [
+  const { dims } = volume.geometry;
+  const center = indexToWorld(volume.geometry, [
     dims[0] * (0.2 + Math.random() * 0.6),
     dims[1] * (0.2 + Math.random() * 0.6),
     dims[2] * (0.2 + Math.random() * 0.6),
   ]);
-  const radius = Math.min(...worldExtent(activeVolume.geometry)) * (0.05 + Math.random() * 0.1);
+  const radius = Math.min(...worldExtent(volume.geometry)) * (0.05 + Math.random() * 0.1);
   segmentation.paintSphere(center, radius, segment);
-  setStatus(`Added segment ${segment} — sphere r=${radius.toFixed(1)}mm`);
+  return { segment, radius };
+}
+
+async function addSphereSegments(): Promise<void> {
+  if (!activeVolume) {
+    setStatus('Open a volume before adding segments.');
+    return;
+  }
+  const count = 50;
+  for (let i = 0; i < count; i++) {
+    const { segment, radius } = paintRandomSphere(activeVolume);
+    setStatus(`Added segment ${segment} — sphere r=${radius.toFixed(1)}mm (${i + 1} / ${count})`);
+    await nextFrame();
+  }
 }
 
 function setAntialiasing(enabled: boolean): void {
@@ -381,5 +390,5 @@ function filesFrom(input: HTMLInputElement): File[] {
 folderInput.addEventListener('change', () => void open(filesFrom(folderInput)));
 kebabButton.addEventListener('click', () => setKebab(!kebabEnabled));
 resetButton.addEventListener('click', resetOrientation);
-sphereButton.addEventListener('click', addSphereSegment);
+sphereButton.addEventListener('click', () => void addSphereSegments());
 antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnabled));
