@@ -20,12 +20,16 @@ struct Uniforms {
   segAntialias: f32,
   dims: vec3<f32>,
   pixelVoxels: f32,
+  bricksPerAxis: vec3<f32>,
+  brickSize: f32,
+  debugEmptyBlocks: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
 @group(0) @binding(1) var volume: texture_3d<f32>;
 @group(0) @binding(2) var segmentation: texture_3d<u32>;
 @group(0) @binding(3) var<uniform> labels: array<vec4<f32>, 256>;
+@group(0) @binding(4) var brickRange: texture_3d<f32>;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -231,6 +235,11 @@ fn inBounds(q: vec3<f32>) -> bool {
   return all(q >= vec3<f32>(0.0)) && all(q <= (U.dims - vec3<f32>(1.0)));
 }
 
+fn brickCoord(q: vec3<f32>) -> vec3<i32> {
+  let grid = vec3<i32>(U.bricksPerAxis) - vec3<i32>(1);
+  return clamp(vec3<i32>(floor(q / U.brickSize)), vec3<i32>(0), grid);
+}
+
 fn applyWindow(value: f32) -> f32 {
   let low = U.windowCenter - U.windowWidth * 0.5;
   return clamp((value - low) / U.windowWidth, 0.0, 1.0);
@@ -244,14 +253,19 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   let rightStep = planeStep(U.right);
   let upStep = planeStep(U.trueUp);
 
+  let mode = u32(U.blendMode);
   var maxValue = -3.0e38;
   var minValue = 3.0e38;
   var sum = 0.0;
-  var hits = 0.0;
+  var inBoundsCount = 0.0;
   var compositeColor = 0.0;
   var compositeAlpha = 0.0;
   var segColor = vec3<f32>(0.0);
   var segAlpha = 0.0;
+  var lastBrick = vec3<i32>(-2);
+  var brickMin = 0.0;
+  var brickMax = 0.0;
+  var debugAlpha = 0.0;
 
   for (var i = 0u; i < count; i = i + 1u) {
     var frac = 0.5;
@@ -263,14 +277,8 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
     if (!inBounds(q)) {
       continue;
     }
-    let value = sampleTrilinear(q);
-    maxValue = max(maxValue, value);
-    minValue = min(minValue, value);
-    sum = sum + value;
-    hits = hits + 1.0;
-    let gray = applyWindow(value);
-    compositeColor = compositeColor + (1.0 - compositeAlpha) * gray * gray;
-    compositeAlpha = compositeAlpha + (1.0 - compositeAlpha) * gray;
+    inBoundsCount = inBoundsCount + 1.0;
+
     if (U.segEnabled > 0.5) {
       var seg = vec4<f32>(0.0);
       if (U.segAntialias > 0.5) {
@@ -281,24 +289,66 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
       segColor = segColor + (1.0 - segAlpha) * seg.rgb;
       segAlpha = segAlpha + (1.0 - segAlpha) * seg.a;
     }
+
+    let bc = brickCoord(q);
+    if (any(bc != lastBrick)) {
+      let r = textureLoad(brickRange, bc, 0);
+      brickMin = r.x;
+      brickMax = r.y;
+      lastBrick = bc;
+    }
+    if (U.debugEmptyBlocks > 0.5 && applyWindow(brickMax) <= 0.0) {
+      let local = q - vec3<f32>(bc) * U.brickSize;
+      let toFace = min(local, vec3<f32>(U.brickSize) - local);
+      let t = clamp(U.pixelVoxels, 0.5, U.brickSize * 0.25);
+      var nearFaces = 0;
+      if (toFace.x < t) { nearFaces = nearFaces + 1; }
+      if (toFace.y < t) { nearFaces = nearFaces + 1; }
+      if (toFace.z < t) { nearFaces = nearFaces + 1; }
+      if (nearFaces >= 2) {
+        debugAlpha = debugAlpha + (1.0 - debugAlpha);
+      }
+    }
+    if (mode == 0u && brickMax <= maxValue) {
+      continue;
+    } else if (mode == 1u && brickMin >= minValue) {
+      continue;
+    } else if (mode == 3u && applyWindow(brickMax) <= 0.0) {
+      continue;
+    }
+
+    let value = sampleTrilinear(q);
+    maxValue = max(maxValue, value);
+    minValue = min(minValue, value);
+    sum = sum + value;
+    let gray = applyWindow(value);
+    compositeColor = compositeColor + (1.0 - compositeAlpha) * gray * gray;
+    compositeAlpha = compositeAlpha + (1.0 - compositeAlpha) * gray;
+
+    if (mode == 3u && U.debugEmptyBlocks < 0.5 && compositeAlpha > 0.995
+      && (U.segEnabled < 0.5 || segAlpha > 0.995)) {
+      break;
+    }
   }
 
-  if (hits == 0.0) {
+  if (inBoundsCount == 0.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
 
-  let mode = u32(U.blendMode);
   var gray = 0.0;
   if (mode == 0u) {
     gray = applyWindow(maxValue);
   } else if (mode == 1u) {
     gray = applyWindow(minValue);
   } else if (mode == 2u) {
-    gray = applyWindow(sum / hits);
+    gray = applyWindow(sum / inBoundsCount);
   } else {
     gray = compositeColor;
   }
-  let rgb = vec3<f32>(gray) * (1.0 - segAlpha) + segColor;
+  var rgb = vec3<f32>(gray) * (1.0 - segAlpha) + segColor;
+  if (debugAlpha > 0.0) {
+    rgb = mix(rgb, vec3<f32>(1.0, 0.08, 0.55), debugAlpha);
+  }
   return vec4<f32>(rgb, 1.0);
 }
 `;

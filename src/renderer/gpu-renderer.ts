@@ -5,13 +5,15 @@ import type { Volume } from '../volume';
 import { RAYCAST_SHADER } from './raycast-shader';
 import type { Renderer } from './renderer';
 
-const UNIFORM_FLOATS = 40;
+const UNIFORM_FLOATS = 48;
 const MAX_SAMPLES = 512;
 const LABEL_FLOATS = 256 * 4;
 
 interface VolumeResource {
   texture: GPUTexture;
   view: GPUTextureView;
+  rangeTexture: GPUTexture;
+  rangeView: GPUTextureView;
   segTexture: GPUTexture | null;
   segView: GPUTextureView | null;
   labelBuffer: GPUBuffer;
@@ -77,6 +79,11 @@ export class GPURenderer implements Renderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: 'uniform' },
         },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'unfilterable-float', viewDimension: '3d' },
+        },
       ],
     });
     this.emptySegTexture = this.device.createTexture({
@@ -106,9 +113,18 @@ export class GPURenderer implements Renderer {
       format: 'r32float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
+    const [nbx, nby, nbz] = volume.store.bricksPerAxis;
+    const rangeTexture = this.device.createTexture({
+      size: { width: nbx, height: nby, depthOrArrayLayers: nbz },
+      dimension: '3d',
+      format: 'rg32float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
     this.volumes.set(volume.id, {
       texture,
       view: texture.createView(),
+      rangeTexture,
+      rangeView: rangeTexture.createView(),
       segTexture: null,
       segView: null,
       labelBuffer: this.device.createBuffer({
@@ -123,6 +139,7 @@ export class GPURenderer implements Renderer {
     const resource = this.volumes.get(id);
     if (!resource) return;
     resource.texture.destroy();
+    resource.rangeTexture.destroy();
     resource.segTexture?.destroy();
     resource.labelBuffer.destroy();
     this.volumes.delete(id);
@@ -138,6 +155,8 @@ export class GPURenderer implements Renderer {
   uploadBricks(volume: Volume, brickIndices: number[]): void {
     const resource = this.volumes.get(volume.id);
     if (!resource) return;
+    const [nbx, nby] = volume.store.bricksPerAxis;
+    const range = new Float32Array(2);
     for (const index of brickIndices) {
       const brick = volume.store.readBrick(index);
       const [w, h, d] = brick.size;
@@ -149,6 +168,21 @@ export class GPURenderer implements Renderer {
         brick.data,
         { bytesPerRow: w * 4, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
+      );
+      range[0] = brick.min;
+      range[1] = brick.max;
+      this.device.queue.writeTexture(
+        {
+          texture: resource.rangeTexture,
+          origin: {
+            x: index % nbx,
+            y: Math.floor(index / nbx) % nby,
+            z: Math.floor(index / (nbx * nby)),
+          },
+        },
+        range,
+        { bytesPerRow: 8, rowsPerImage: 1 },
+        { width: 1, height: 1, depthOrArrayLayers: 1 },
       );
     }
   }
@@ -231,6 +265,7 @@ export class GPURenderer implements Renderer {
             { binding: 1, resource: volumeResource.view },
             { binding: 2, resource: segView },
             { binding: 3, resource: { buffer: volumeResource.labelBuffer } },
+            { binding: 4, resource: volumeResource.rangeView },
           ],
         });
         resource.bindGroupVolumeId = viewport.volume.id;
@@ -244,7 +279,13 @@ export class GPURenderer implements Renderer {
       }
 
       const segEnabled = viewport.segmentationVisible && volumeResource.segTexture !== null;
-      writeUniforms(resource.uniformData, viewport, segEnabled, viewport.segmentationAntialiasing);
+      writeUniforms(
+        resource.uniformData,
+        viewport,
+        segEnabled,
+        viewport.segmentationAntialiasing,
+        viewport.debugEmptyBlocks,
+      );
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
 
       const pass = encoder.beginRenderPass({
@@ -272,6 +313,7 @@ export class GPURenderer implements Renderer {
     for (const id of this.viewports.keys()) this.destroyViewport(id);
     for (const resource of this.volumes.values()) {
       resource.texture.destroy();
+      resource.rangeTexture.destroy();
       resource.segTexture?.destroy();
       resource.labelBuffer.destroy();
     }
@@ -300,6 +342,7 @@ function writeUniforms(
   viewport: Viewport,
   segEnabled: boolean,
   segAntialias: boolean,
+  debugEmptyBlocks: boolean,
 ): void {
   const camera = viewport.camera;
   const { right, trueUp, normal } = camera.basis();
@@ -362,4 +405,11 @@ function writeUniforms(
   );
   const worldPerPixel = (2 * halfHeight) / viewport.canvas.height;
   arr[39] = worldPerPixel * voxelsPerWorld;
+
+  const store = viewport.volume.store;
+  arr[40] = store.bricksPerAxis[0];
+  arr[41] = store.bricksPerAxis[1];
+  arr[42] = store.bricksPerAxis[2];
+  arr[43] = store.brickSize;
+  arr[44] = debugEmptyBlocks ? 1 : 0;
 }

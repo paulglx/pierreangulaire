@@ -119,6 +119,8 @@ Each brick is in one of three states: **Absent**, **Loading**, or **Resident**.
 
 The same page table serves four purposes: sparse storage, progressive load status, empty-space skipping during raycast, and dirty-region sync after edits (re-upload to GPU textures, or direct re-read on CPU).
 
+Alongside the page table, each image brick carries a **value range** (min/max of its voxels), computed once when the brick becomes Resident. This is the acceleration structure for empty-space skipping during raycast (§7.2): because a brick's contribution depends on the current window/level and blend mode — air is signal in MinIP, background in a soft-tissue composite — the range is tested per frame against the live view state rather than against any fixed intensity. It is a skip _hint_ layered over full storage, never a reason to drop a brick: every voxel is always stored, so switching blend mode or window never loses data.
+
 ### 5.2 Two-phase volume lifecycle
 
 Geometry is known before voxel data (from headers), so allocation precedes fill. A volume is created from its geometry and voxel format; it is allocated in the brick store and renderable from the first frame (the `GPURenderer` allocates the matching GPU textures). Full slices are then written one by one — each a complete plane along the acquisition axis — as the loader delivers them.
@@ -196,6 +198,12 @@ Rendering goes through a swappable `Renderer` interface (§14). The `RenderingEn
 
 A single pipeline: **orthographic slab raycast**. Parallel rays are cast along the `normal` vector and marched from the near slab plane to `near + slabThickness`, accumulated by the blend mode. Grayscale is mapped via window/level; segmentation is composited via the compositing rule. Absent/empty bricks are skipped; gradient-based shading is optional. Both renderers implement this same algorithm — the `GPURenderer` as a WGSL pipeline, the `CPURenderer` as a CPU kernel — and must produce pixel-consistent output (enforced by golden-image cross-tests).
 
+**Empty-space skipping.** For thick-slab and full-volume modes, marching every sample is dominated by trilinear fetches through regions that cannot affect the result. Each sample first consults its brick's value range (§5.1, cached across consecutive samples in the same brick — one lookup per brick boundary crossed, not per sample) and skips the trilinear fetch when the brick cannot change the pixel under the current view state: for MIP when the brick max is at or below the running maximum, for MinIP when the brick min is at or above the running minimum, for Composite when the brick max maps below the window low (contributes zero). Average visits every sample (the mean depends on all of them). The skip never changes output: a value the gate skips at a brick boundary is captured where the ray passes through the brick that actually holds it. This is a correct optimization in every mode, not an approximation.
+
+**Early ray termination.** In Composite, a ray stops once accumulated opacity saturates — deeper samples cannot change the pixel. When the segmentation overlay is visible it is held to the same bar (termination waits until the overlay's coverage has also saturated) so an in-front opaque structure never clips a segment drawn behind it.
+
+Thin-slab views (the default, ~1 sample per ray) neither need nor pay for either optimization; both target the marching-heavy thick-slab and full-volume paths.
+
 Sample count per ray scales with slab thickness, so one pipeline spans the full range of views:
 
 | orientation          | slab thickness | blend                 | result                        |
@@ -249,6 +257,7 @@ A viewport is bound to one canvas and one image volume, and exposes:
 - A camera (§8).
 - Visibility toggle for the volume's built-in segmentation.
 - Antialiasing toggle for the segmentation (§6.3).
+- Empty-block debug toggle (default off): draws a pink wireframe around the edges of bricks with no in-window content — the empty space the raycast skips (§7.2) — and disables early ray termination so the whole skipped structure is visible. Diagnostic only; changes nothing about what is stored or normally rendered.
 - Window/level, blend mode, and slab thickness.
 - Synchronous world↔canvas coordinate transforms (computed TS-side).
 - On-demand single-voxel sampling (reads the CPU-resident brick store).
@@ -421,6 +430,7 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 - **RenderingEngine** (§10): singleton module accessor + one-time async init, `createVolume` / `createViewport`, volume and viewport destruction (a volume referenced by a live viewport is rejected), full engine teardown (stops the loop, releases resources, destroys the renderer, resets the singleton), and a `requestAnimationFrame` loop that uploads dirty bricks and redraws dirty viewports.
 - **GPURenderer** (§7, §14): WebGPU orthographic slab raycast in WGSL, one canvas context per viewport, per-brick texture upload.
 - **Blend modes** (§7.3): MIP, MinIP, Average. Composite is a basic front-to-back accumulation (grayscale used as opacity).
+- **Empty-space skipping & early ray termination** (§5.1, §7.2): a per-image-brick min/max value range, computed on residency and mirrored to a small `rg32float` 3D texture (one texel per brick), gates the per-sample trilinear fetch per blend mode against the live window/level; Composite additionally terminates a ray once opacity saturates (deferred while a visible segment overlay is still accumulating). A per-viewport **empty-block debug toggle** (§9) draws these skipped bricks as a pink wireframe.
 - **Segmentation** (§6.1–6.2): built-in 1:1 segmentation per volume with K=4 slot sets, sphere paint writes with slot-overflow eviction (lowest index), present-segment listing, a 256-entry label table (color / opacity / visibility, versioned), and dirty-brick sync through the renderer contract.
 - **Segmentation rendering** (§6.3): point-sampled slot sets composited in the raycast shader — quasi-opaque border (3 voxels wide) where an in-plane neighbor lacks the segment, transparent fill inside, every visible segment blended additively, accumulated front-to-back along the slab and blended over the grayscale sample — with per-viewport visibility and antialiasing toggles (antialiasing derives a smooth silhouette and outline from a grid-anchored, continuous blurred coverage field with a screen-space-adaptive edge, on by default).
 
@@ -431,6 +441,7 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 - The segmentation store is likewise a dense slot-set array (4 bytes/voxel); the `GPURenderer` mirrors it into a dense **`rgba8uint` 3D texture** created lazily on the first paint, with the label table in a per-volume uniform buffer re-uploaded when its version changes.
 - Voxel writes are exposed directly on the segmentation (sphere paint); the editor abstraction (§6.4 — active segment, erase, stroke grouping, undo/redo) is not built yet.
 - The scheduler (§5.4) is not prioritized: arrivals are coalesced into per-frame dirty-brick uploads in slice order.
+- Empty-space skipping (§7.2) gates a **fixed-step** march (it skips a sample's trilinear fetch) rather than jumping the ray to the next non-empty brick boundary; the loop still iterates the full sample count. This removes the dominant fetch cost in skippable regions without the thread divergence of a per-ray DDA. A true skip-ahead traversal can replace it later if measured.
 
 ### 18.3 Not yet implemented
 

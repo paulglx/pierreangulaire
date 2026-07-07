@@ -18,6 +18,7 @@ const kebabButton = document.querySelector<HTMLButtonElement>('#kebab')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
 const sphereButton = document.querySelector<HTMLButtonElement>('#sphere')!;
 const antialiasButton = document.querySelector<HTMLButtonElement>('#antialiasing')!;
+const debugBlocksButton = document.querySelector<HTMLButtonElement>('#debug-blocks')!;
 
 const KEBAB_RAD_PER_SEC = (2 * Math.PI) / 24;
 
@@ -39,6 +40,7 @@ interface ActiveViewport {
 let activeViewports: ActiveViewport[] = [];
 let activeVolume: Volume | null = null;
 let antialiasEnabled = true;
+let debugBlocksEnabled = false;
 
 let kebabEnabled = false;
 let kebabRaf = 0;
@@ -354,6 +356,7 @@ async function open(files: File[]): Promise<void> {
     });
     viewport.setWindowLevel({ center: series.windowCenter, width: series.windowWidth });
     viewport.setSegmentationAntialiasing(antialiasEnabled);
+    viewport.setDebugEmptyBlocks(debugBlocksEnabled);
     activeViewports.push({
       viewport,
       orientation: panel.orientation,
@@ -419,6 +422,14 @@ function setAntialiasing(enabled: boolean): void {
   for (const { viewport } of activeViewports) viewport.setSegmentationAntialiasing(enabled);
 }
 
+function setDebugBlocks(enabled: boolean): void {
+  debugBlocksEnabled = enabled;
+  debugBlocksButton.textContent = `Empty blocks: ${enabled ? 'on' : 'off'}`;
+  debugBlocksButton.classList.toggle('text-stone-50', enabled);
+  debugBlocksButton.classList.toggle('text-stone-400', !enabled);
+  for (const { viewport } of activeViewports) viewport.setDebugEmptyBlocks(enabled);
+}
+
 function filesFrom(input: HTMLInputElement): File[] {
   return input.files ? [...input.files] : [];
 }
@@ -428,3 +439,4 @@ kebabButton.addEventListener('click', () => setKebab(!kebabEnabled));
 resetButton.addEventListener('click', resetOrientation);
 sphereButton.addEventListener('click', () => void addSphereSegments());
 antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnabled));
+debugBlocksButton.addEventListener('click', () => setDebugBlocks(!debugBlocksEnabled));

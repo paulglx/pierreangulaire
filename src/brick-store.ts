@@ -8,6 +8,8 @@ export interface BrickRegion {
   readonly origin: readonly [number, number, number];
   readonly size: readonly [number, number, number];
   readonly data: Float32Array;
+  readonly min: number;
+  readonly max: number;
 }
 
 export interface BrickBounds {
@@ -128,16 +130,21 @@ export class BrickStore {
     const [ox, oy, oz] = origin;
     const [w, h, d] = size;
     const data = new Float32Array(w * h * d);
+    let min = Infinity;
+    let max = -Infinity;
     for (let z = 0; z < d; z++) {
       for (let y = 0; y < h; y++) {
         const srcRow = ox + (oy + y) * dx + (oz + z) * dx * dy;
         const dstRow = y * w + z * w * h;
         for (let x = 0; x < w; x++) {
-          data[dstRow + x] = this.voxels[srcRow + x]!;
+          const value = this.voxels[srcRow + x]!;
+          data[dstRow + x] = value;
+          if (value < min) min = value;
+          if (value > max) max = value;
         }
       }
     }
-    return { origin: [ox, oy, oz], size: [w, h, d], data };
+    return { origin: [ox, oy, oz], size: [w, h, d], data, min, max };
   }
 
   sampleVoxel(i: number, j: number, k: number): number {

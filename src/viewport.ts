@@ -15,6 +15,7 @@ export class Viewport {
   slabThickness: number;
   segmentationVisible = true;
   segmentationAntialiasing = true;
+  debugEmptyBlocks = false;
   dirty = true;
 
   constructor(id: string, canvas: HTMLCanvasElement, volume: Volume, camera: Camera) {
@@ -53,6 +54,11 @@ export class Viewport {
 
   setSegmentationAntialiasing(enabled: boolean): void {
     this.segmentationAntialiasing = enabled;
+    this.dirty = true;
+  }
+
+  setDebugEmptyBlocks(enabled: boolean): void {
+    this.debugEmptyBlocks = enabled;
     this.dirty = true;
   }
 
