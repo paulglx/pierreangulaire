@@ -9,7 +9,7 @@ import {
   volumeCenter,
   worldExtent,
 } from 'pierreangulaire';
-import { type LoadedSeries, loadSeries } from './dicom';
+import { openSeries, type SeriesStream } from './dicom';
 import './style.css';
 
 const statusEl = document.querySelector<HTMLDivElement>('#status')!;
@@ -191,7 +191,14 @@ function addSlider(controls: HTMLElement, viewport: Viewport, spec: SliderSpec):
   controls.append(label);
 }
 
-function buildControls(viewport: Viewport, volume: Volume, series: LoadedSeries): void {
+interface ControlRange {
+  min: number;
+  max: number;
+  center: number;
+  width: number;
+}
+
+function buildControls(viewport: Viewport, volume: Volume, range: ControlRange): void {
   const panel = viewport.canvas.parentElement!;
   panel.querySelector('[data-controls]')?.remove();
   const controls = document.createElement('div');
@@ -235,19 +242,19 @@ function buildControls(viewport: Viewport, volume: Volume, series: LoadedSeries)
     },
     {
       name: 'Level',
-      min: series.min,
-      max: series.max,
+      min: range.min,
+      max: range.max,
       step: 1,
-      value: series.windowCenter,
+      value: range.center,
       format: (v) => String(Math.round(v)),
       apply: (v) => viewport.setWindowLevel({ center: v, width: viewport.windowLevel.width }),
     },
     {
       name: 'Window',
       min: 1,
-      max: Math.max(2, series.max - series.min),
+      max: Math.max(2, range.max - range.min),
       step: 1,
-      value: series.windowWidth,
+      value: range.width,
       format: (v) => String(Math.round(v)),
       apply: (v) => viewport.setWindowLevel({ center: viewport.windowLevel.center, width: v }),
     },
@@ -275,23 +282,41 @@ function buildControls(viewport: Viewport, volume: Volume, series: LoadedSeries)
   panel.append(controls);
 }
 
-async function streamSlices(volume: Volume, slices: Float32Array[]): Promise<void> {
-  for (let k = 0; k < slices.length; k++) {
-    volume.writeSlice(k, slices[k]!);
+async function streamSlices(
+  volume: Volume,
+  series: SeriesStream,
+  onRange: (min: number, max: number) => void,
+): Promise<ControlRange> {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (let k = 0; k < series.sliceCount; k++) {
+    const slice = series.decodeSlice(k);
+    if (!slice) continue;
+    for (let i = 0; i < slice.length; i++) {
+      const value = slice[i]!;
+      if (value < min) min = value;
+      if (value > max) max = value;
+    }
+    volume.writeSlice(k, slice);
     if (k % 8 === 0) {
-      setStatus(`Loading slice ${k + 1} / ${slices.length}…`);
+      setStatus(`Loading slice ${k + 1} / ${series.sliceCount}…`);
+      onRange(min, max);
       await nextFrame();
     }
   }
+  onRange(min, max);
+  const center = series.hasTaggedWindow ? series.windowCenter : (min + max) / 2;
+  const width = series.hasTaggedWindow ? series.windowWidth : Math.max(1, max - min);
+  return { min, max, center, width };
 }
 
 async function open(files: File[]): Promise<void> {
   if (files.length === 0) return;
   setStatus(`Reading ${files.length} files…`);
 
-  let series: LoadedSeries;
+  let series: SeriesStream;
   try {
-    series = await loadSeries(files);
+    series = await openSeries(files);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : 'Failed to read DICOM files.');
     return;
@@ -320,6 +345,7 @@ async function open(files: File[]): Promise<void> {
 
   for (const panel of PANELS) {
     const canvas = document.querySelector<HTMLCanvasElement>(`#${panel.id}`)!;
+    canvas.parentElement?.querySelector('[data-controls]')?.remove();
     const viewport = engine.createViewport({
       id: panel.id,
       canvas,
@@ -328,7 +354,6 @@ async function open(files: File[]): Promise<void> {
     });
     viewport.setWindowLevel({ center: series.windowCenter, width: series.windowWidth });
     viewport.setSegmentationAntialiasing(antialiasEnabled);
-    buildControls(viewport, volume, series);
     activeViewports.push({
       viewport,
       orientation: panel.orientation,
@@ -344,7 +369,18 @@ async function open(files: File[]): Promise<void> {
   }
   syncResetButton();
 
-  await streamSlices(volume, series.slices);
+  const applyAutoWindow = (min: number, max: number): void => {
+    if (series.hasTaggedWindow) return;
+    const center = (min + max) / 2;
+    const width = Math.max(1, max - min);
+    for (const { viewport } of activeViewports) {
+      viewport.setWindowLevel({ center, width });
+      viewport.markDirty();
+    }
+  };
+
+  const range = await streamSlices(volume, series, applyAutoWindow);
+  for (const { viewport } of activeViewports) buildControls(viewport, volume, range);
   setStatus(`${series.description} — ${dx}×${dy}×${dz}`);
 }
 

@@ -2,20 +2,20 @@ import dicomParser, { type DataSet, type Element } from 'dicom-parser';
 import type { Vec3, VolumeFormat, VolumeGeometry } from 'pierreangulaire';
 import { decodeJpegLossless, decodeRle, type FrameInfo, type PixelSamples } from './decode';
 
-export interface LoadedSeries {
+export interface SeriesStream {
   geometry: VolumeGeometry;
   format: VolumeFormat;
-  slices: Float32Array[];
   windowCenter: number;
   windowWidth: number;
-  min: number;
-  max: number;
+  hasTaggedWindow: boolean;
   description: string;
+  sliceCount: number;
+  decodeSlice(index: number): Float32Array | null;
 }
 
-interface ParsedSlice {
-  position: Vec3;
-  values: Float32Array;
+interface SliceSource {
+  dataSet: DataSet | undefined;
+  transferSyntax: string;
 }
 
 const RLE_LOSSLESS = '1.2.840.10008.1.2.5';
@@ -123,7 +123,7 @@ function readPixelValues(dataSet: DataSet, transferSyntax: string): Float32Array
   return values;
 }
 
-function parseSlice(dataSet: DataSet): ParsedSlice | null {
+function sliceMetadata(dataSet: DataSet): { position: Vec3; transferSyntax: string } | null {
   const transferSyntax = dataSet.string('x00020010') ?? '';
   if (transferSyntax === BIG_ENDIAN) {
     throw new Error('Big-endian DICOM is not supported by this minimal viewer.');
@@ -133,13 +133,18 @@ function parseSlice(dataSet: DataSet): ParsedSlice | null {
       'This DICOM transfer syntax is not supported. Supported: uncompressed, RLE Lossless, and JPEG Lossless.',
     );
   }
+  const rows = dataSet.uint16('x00280010');
+  const columns = dataSet.uint16('x00280011');
+  const pixelData = dataSet.elements['x7fe00010'];
   const position = vec3From(numbersFromString(dataSet.string('x00200032')), 0);
-  const values = readPixelValues(dataSet, transferSyntax);
-  if (!position || !values) return null;
-  return { position, values };
+  if (!pixelData || !rows || !columns || !position) return null;
+  if ((dataSet.uint16('x00280002') ?? 1) !== 1) {
+    throw new Error('Only single-sample grayscale images are supported.');
+  }
+  return { position, transferSyntax };
 }
 
-function buildGeometry(reference: DataSet, sorted: ParsedSlice[], normal: Vec3): VolumeGeometry {
+function buildGeometry(reference: DataSet, positions: Vec3[], normal: Vec3): VolumeGeometry {
   const columns = reference.uint16('x00280011')!;
   const rows = reference.uint16('x00280010')!;
   const orientation = numbersFromString(reference.string('x00200037'));
@@ -149,36 +154,23 @@ function buildGeometry(reference: DataSet, sorted: ParsedSlice[], normal: Vec3):
   const rowSpacing = pixelSpacing[0] ?? 1;
   const columnSpacing = pixelSpacing[1] ?? 1;
 
-  const first = sorted[0]!.position;
+  const first = positions[0]!;
   let sliceSpacing = reference.floatString('x00180050') ?? 1;
-  if (sorted.length > 1) {
-    const projectionGap = dot(sorted[1]!.position, normal) - dot(first, normal);
+  if (positions.length > 1) {
+    const projectionGap = dot(positions[1]!, normal) - dot(first, normal);
     if (Math.abs(projectionGap) > 1e-4) sliceSpacing = Math.abs(projectionGap);
   }
 
   return {
-    dims: [columns, rows, sorted.length],
+    dims: [columns, rows, positions.length],
     spacing: [columnSpacing, rowSpacing, sliceSpacing],
     origin: first,
     direction: [rowDir, columnDir, normal],
   };
 }
 
-function dataRange(slices: Float32Array[]): { min: number; max: number } {
-  let min = Number.POSITIVE_INFINITY;
-  let max = Number.NEGATIVE_INFINITY;
-  for (const slice of slices) {
-    for (let i = 0; i < slice.length; i++) {
-      const value = slice[i]!;
-      if (value < min) min = value;
-      if (value > max) max = value;
-    }
-  }
-  return { min, max };
-}
-
-export async function loadSeries(files: File[]): Promise<LoadedSeries> {
-  const parsed: ParsedSlice[] = [];
+export async function openSeries(files: File[]): Promise<SeriesStream> {
+  const entries: { source: SliceSource; position: Vec3 }[] = [];
   let reference: DataSet | undefined;
 
   for (const file of files) {
@@ -189,13 +181,16 @@ export async function loadSeries(files: File[]): Promise<LoadedSeries> {
     } catch {
       continue;
     }
-    const slice = parseSlice(dataSet);
-    if (!slice) continue;
-    parsed.push(slice);
+    const meta = sliceMetadata(dataSet);
+    if (!meta) continue;
+    entries.push({
+      source: { dataSet, transferSyntax: meta.transferSyntax },
+      position: meta.position,
+    });
     reference ??= dataSet;
   }
 
-  if (!reference || parsed.length === 0) {
+  if (!reference || entries.length === 0) {
     throw new Error('No readable DICOM image slices were found.');
   }
 
@@ -204,11 +199,14 @@ export async function loadSeries(files: File[]): Promise<LoadedSeries> {
   const columnDir = normalize(vec3From(orientation, 3) ?? [0, 1, 0]);
   const normal = normalize(cross(rowDir, columnDir));
 
-  parsed.sort((a, b) => dot(a.position, normal) - dot(b.position, normal));
+  entries.sort((a, b) => dot(a.position, normal) - dot(b.position, normal));
 
-  const geometry = buildGeometry(reference, parsed, normal);
-  const slices = parsed.map((slice) => slice.values);
-  const range = dataRange(slices);
+  const geometry = buildGeometry(
+    reference,
+    entries.map((entry) => entry.position),
+    normal,
+  );
+  const sources = entries.map((entry) => entry.source);
 
   const taggedCenter = reference.floatString('x00281050');
   const taggedWidth = reference.floatString('x00281051');
@@ -218,11 +216,17 @@ export async function loadSeries(files: File[]): Promise<LoadedSeries> {
   return {
     geometry,
     format: 'float32',
-    slices,
-    windowCenter: hasTaggedWindow ? taggedCenter : (range.min + range.max) / 2,
-    windowWidth: hasTaggedWindow ? taggedWidth : Math.max(1, range.max - range.min),
-    min: range.min,
-    max: range.max,
+    windowCenter: hasTaggedWindow ? taggedCenter : 0,
+    windowWidth: hasTaggedWindow ? taggedWidth : 1,
+    hasTaggedWindow,
     description: reference.string('x0008103e') ?? reference.string('x00081030') ?? 'DICOM volume',
+    sliceCount: sources.length,
+    decodeSlice(index) {
+      const source = sources[index];
+      if (!source?.dataSet) return null;
+      const values = readPixelValues(source.dataSet, source.transferSyntax);
+      source.dataSet = undefined;
+      return values;
+    },
   };
 }
