@@ -5,6 +5,9 @@ export type { RenderingEngineOptions, CreateViewportOptions } from './rendering-
 
 export { Volume } from './volume';
 
+export { Segmentation, OVERLAP_DEPTH } from './segmentation';
+export type { LabelStyle, SegmentationBrickRegion } from './segmentation';
+
 export { Viewport } from './viewport';
 
 export { Camera, cameraForOrientation, fitCamera, worldToCanvas, canvasToWorld } from './camera';

@@ -1,4 +1,5 @@
 import { type VolumeFormat, type VolumeGeometry, voxelCount } from './geometry';
+import type { Vec3 } from './math';
 
 export const BrickState = { Absent: 0, Loading: 1, Resident: 2 } as const;
 export type BrickState = (typeof BrickState)[keyof typeof BrickState];
@@ -7,6 +8,39 @@ export interface BrickRegion {
   readonly origin: readonly [number, number, number];
   readonly size: readonly [number, number, number];
   readonly data: Float32Array;
+}
+
+export interface BrickBounds {
+  readonly origin: readonly [number, number, number];
+  readonly size: readonly [number, number, number];
+}
+
+export function brickGridSize(dims: Vec3, brickSize: number): readonly [number, number, number] {
+  return [
+    Math.ceil(dims[0] / brickSize),
+    Math.ceil(dims[1] / brickSize),
+    Math.ceil(dims[2] / brickSize),
+  ];
+}
+
+export function brickBounds(
+  dims: Vec3,
+  brickSize: number,
+  grid: readonly [number, number, number],
+  linearIndex: number,
+): BrickBounds {
+  const [nbx, nby] = grid;
+  const ox = (linearIndex % nbx) * brickSize;
+  const oy = (Math.floor(linearIndex / nbx) % nby) * brickSize;
+  const oz = Math.floor(linearIndex / (nbx * nby)) * brickSize;
+  return {
+    origin: [ox, oy, oz],
+    size: [
+      Math.min(brickSize, dims[0] - ox),
+      Math.min(brickSize, dims[1] - oy),
+      Math.min(brickSize, dims[2] - oz),
+    ],
+  };
 }
 
 type VoxelArray = Int16Array | Uint16Array | Uint8Array | Float32Array;
@@ -40,12 +74,8 @@ export class BrickStore {
     this.geometry = geometry;
     this.format = format;
     this.brickSize = brickSize;
-    const [dx, dy, dz] = geometry.dims;
-    this.bricksPerAxis = [
-      Math.ceil(dx / brickSize),
-      Math.ceil(dy / brickSize),
-      Math.ceil(dz / brickSize),
-    ];
+    const dz = geometry.dims[2];
+    this.bricksPerAxis = brickGridSize(geometry.dims, brickSize);
     this.voxels = createVoxelArray(format, voxelCount(geometry));
     this.states = new Uint8Array(
       this.bricksPerAxis[0] * this.bricksPerAxis[1] * this.bricksPerAxis[2],
@@ -88,17 +118,15 @@ export class BrickStore {
   }
 
   readBrick(linearIndex: number): BrickRegion {
-    const [nbx, nby] = this.bricksPerAxis;
-    const bx = linearIndex % nbx;
-    const by = Math.floor(linearIndex / nbx) % nby;
-    const bz = Math.floor(linearIndex / (nbx * nby));
-    const [dx, dy, dz] = this.geometry.dims;
-    const ox = bx * this.brickSize;
-    const oy = by * this.brickSize;
-    const oz = bz * this.brickSize;
-    const w = Math.min(this.brickSize, dx - ox);
-    const h = Math.min(this.brickSize, dy - oy);
-    const d = Math.min(this.brickSize, dz - oz);
+    const { origin, size } = brickBounds(
+      this.geometry.dims,
+      this.brickSize,
+      this.bricksPerAxis,
+      linearIndex,
+    );
+    const [dx, dy] = this.geometry.dims;
+    const [ox, oy, oz] = origin;
+    const [w, h, d] = size;
     const data = new Float32Array(w * h * d);
     for (let z = 0; z < d; z++) {
       for (let y = 0; y < h; y++) {

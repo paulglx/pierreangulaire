@@ -13,7 +13,7 @@ export class Viewport {
   windowLevel: WindowLevel;
   blendMode: BlendMode;
   slabThickness: number;
-  segmentationVisible = false;
+  segmentationVisible = true;
   dirty = true;
 
   constructor(id: string, canvas: HTMLCanvasElement, volume: Volume, camera: Camera) {

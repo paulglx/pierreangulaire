@@ -15,15 +15,17 @@ struct Uniforms {
   dirCol2: vec3<f32>,
   blendMode: f32,
   origin: vec3<f32>,
-  pad0: f32,
+  segEnabled: f32,
   spacing: vec3<f32>,
-  pad1: f32,
+  pad0: f32,
   dims: vec3<f32>,
-  pad2: f32,
+  pad1: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
 @group(0) @binding(1) var volume: texture_3d<f32>;
+@group(0) @binding(2) var segmentation: texture_3d<u32>;
+@group(0) @binding(3) var<uniform> labels: array<vec4<f32>, 256>;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -78,6 +80,64 @@ fn sampleTrilinear(q: vec3<f32>) -> f32 {
   return mix(y0, y1, f.z);
 }
 
+const BORDER_ALPHA = 0.9;
+
+fn worldDirToIndex(v: vec3<f32>) -> vec3<f32> {
+  return vec3<f32>(
+    dot(v, U.dirCol0) / U.spacing.x,
+    dot(v, U.dirCol1) / U.spacing.y,
+    dot(v, U.dirCol2) / U.spacing.z,
+  );
+}
+
+fn planeStep(v: vec3<f32>) -> vec3<f32> {
+  let d = worldDirToIndex(v);
+  let m = max(max(abs(d.x), abs(d.y)), abs(d.z));
+  return d / max(m, 1e-6);
+}
+
+fn slotsAt(q: vec3<f32>) -> vec4<u32> {
+  let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
+  let c = clamp(vec3<i32>(round(q)), vec3<i32>(0), maxIndex);
+  return textureLoad(segmentation, c, 0);
+}
+
+fn containsSegment(slots: vec4<u32>, segment: u32) -> bool {
+  return any(slots == vec4<u32>(segment));
+}
+
+fn sampleSegmentation(q: vec3<f32>, rightStep: vec3<f32>, upStep: vec3<f32>) -> vec4<f32> {
+  var slots = slotsAt(q);
+  if (all(slots == vec4<u32>(0u))) {
+    return vec4<f32>(0.0);
+  }
+  let nl = slotsAt(q - rightStep);
+  let nr = slotsAt(q + rightStep);
+  let nd = slotsAt(q - upStep);
+  let nu = slotsAt(q + upStep);
+  var color = vec3<f32>(0.0);
+  var alpha = 0.0;
+  for (var s = 0u; s < 4u; s = s + 1u) {
+    let segment = slots[s];
+    if (segment == 0u) {
+      continue;
+    }
+    let style = labels[segment];
+    if (style.a == 0.0) {
+      continue;
+    }
+    let interior = containsSegment(nl, segment) && containsSegment(nr, segment)
+      && containsSegment(nd, segment) && containsSegment(nu, segment);
+    var a = style.a;
+    if (!interior) {
+      a = max(a, BORDER_ALPHA);
+    }
+    color = color + style.rgb * a;
+    alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
+  }
+  return vec4<f32>(min(color, vec3<f32>(1.0)), alpha);
+}
+
 fn inBounds(q: vec3<f32>) -> bool {
   return all(q >= vec3<f32>(0.0)) && all(q <= (U.dims - vec3<f32>(1.0)));
 }
@@ -92,6 +152,8 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   let plane = U.focalPoint + U.right * (in.uv.x * U.halfWidth) + U.trueUp * (in.uv.y * U.halfHeight);
   let count = max(u32(U.sampleCount), 1u);
   let start = plane - U.normal * (U.slabThickness * 0.5);
+  let rightStep = planeStep(U.right);
+  let upStep = planeStep(U.trueUp);
 
   var maxValue = -3.0e38;
   var minValue = 3.0e38;
@@ -99,6 +161,8 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   var hits = 0.0;
   var compositeColor = 0.0;
   var compositeAlpha = 0.0;
+  var segColor = vec3<f32>(0.0);
+  var segAlpha = 0.0;
 
   for (var i = 0u; i < count; i = i + 1u) {
     var frac = 0.5;
@@ -118,6 +182,11 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
     let gray = applyWindow(value);
     compositeColor = compositeColor + (1.0 - compositeAlpha) * gray * gray;
     compositeAlpha = compositeAlpha + (1.0 - compositeAlpha) * gray;
+    if (U.segEnabled > 0.5) {
+      let seg = sampleSegmentation(q, rightStep, upStep);
+      segColor = segColor + (1.0 - segAlpha) * seg.rgb;
+      segAlpha = segAlpha + (1.0 - segAlpha) * seg.a;
+    }
   }
 
   if (hits == 0.0) {
@@ -135,6 +204,7 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   } else {
     gray = compositeColor;
   }
-  return vec4<f32>(gray, gray, gray, 1.0);
+  let rgb = vec3<f32>(gray) * (1.0 - segAlpha) + segColor;
+  return vec4<f32>(rgb, 1.0);
 }
 `;

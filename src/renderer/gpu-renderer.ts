@@ -1,3 +1,4 @@
+import type { Segmentation } from '../segmentation';
 import type { Viewport } from '../viewport';
 import type { Volume } from '../volume';
 import { RAYCAST_SHADER } from './raycast-shader';
@@ -5,10 +6,15 @@ import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 40;
 const MAX_SAMPLES = 512;
+const LABEL_FLOATS = 256 * 4;
 
 interface VolumeResource {
   texture: GPUTexture;
   view: GPUTextureView;
+  segTexture: GPUTexture | null;
+  segView: GPUTextureView | null;
+  labelBuffer: GPUBuffer;
+  labelVersion: number;
 }
 
 interface ViewportResource {
@@ -17,6 +23,7 @@ interface ViewportResource {
   uniformData: Float32Array;
   bindGroup: GPUBindGroup | null;
   bindGroupVolumeId: string | null;
+  bindGroupSegView: GPUTextureView | null;
 }
 
 export class GPURenderer implements Renderer {
@@ -24,6 +31,8 @@ export class GPURenderer implements Renderer {
   private format!: GPUTextureFormat;
   private pipeline!: GPURenderPipeline;
   private bindGroupLayout!: GPUBindGroupLayout;
+  private emptySegTexture!: GPUTexture;
+  private emptySegView!: GPUTextureView;
 
   private readonly volumes = new Map<string, VolumeResource>();
   private readonly viewports = new Map<string, ViewportResource>();
@@ -57,8 +66,25 @@ export class GPURenderer implements Renderer {
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: 'unfilterable-float', viewDimension: '3d' },
         },
+        {
+          binding: 2,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'uint', viewDimension: '3d' },
+        },
+        {
+          binding: 3,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform' },
+        },
       ],
     });
+    this.emptySegTexture = this.device.createTexture({
+      size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+      dimension: '3d',
+      format: 'rgba8uint',
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.emptySegView = this.emptySegTexture.createView();
     this.pipeline = this.device.createRenderPipeline({
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
       vertex: { module, entryPoint: 'vs' },
@@ -79,18 +105,31 @@ export class GPURenderer implements Renderer {
       format: 'r32float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    this.volumes.set(volume.id, { texture, view: texture.createView() });
+    this.volumes.set(volume.id, {
+      texture,
+      view: texture.createView(),
+      segTexture: null,
+      segView: null,
+      labelBuffer: this.device.createBuffer({
+        size: LABEL_FLOATS * 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      }),
+      labelVersion: -1,
+    });
   }
 
   onVolumeDestroyed(id: string): void {
     const resource = this.volumes.get(id);
     if (!resource) return;
     resource.texture.destroy();
+    resource.segTexture?.destroy();
+    resource.labelBuffer.destroy();
     this.volumes.delete(id);
     for (const viewport of this.viewports.values()) {
       if (viewport.bindGroupVolumeId === id) {
         viewport.bindGroup = null;
         viewport.bindGroupVolumeId = null;
+        viewport.bindGroupSegView = null;
       }
     }
   }
@@ -104,6 +143,34 @@ export class GPURenderer implements Renderer {
       this.device.queue.writeTexture(
         {
           texture: resource.texture,
+          origin: { x: brick.origin[0], y: brick.origin[1], z: brick.origin[2] },
+        },
+        brick.data,
+        { bytesPerRow: w * 4, rowsPerImage: h },
+        { width: w, height: h, depthOrArrayLayers: d },
+      );
+    }
+  }
+
+  uploadSegmentationBricks(volume: Volume, brickIndices: number[]): void {
+    const resource = this.volumes.get(volume.id);
+    if (!resource) return;
+    if (!resource.segTexture) {
+      const [width, height, depth] = volume.geometry.dims;
+      resource.segTexture = this.device.createTexture({
+        size: { width, height, depthOrArrayLayers: depth },
+        dimension: '3d',
+        format: 'rgba8uint',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      resource.segView = resource.segTexture.createView();
+    }
+    for (const index of brickIndices) {
+      const brick = volume.segmentation.readBrick(index);
+      const [w, h, d] = brick.size;
+      this.device.queue.writeTexture(
+        {
+          texture: resource.segTexture,
           origin: { x: brick.origin[0], y: brick.origin[1], z: brick.origin[2] },
         },
         brick.data,
@@ -128,6 +195,7 @@ export class GPURenderer implements Renderer {
       uniformData: new Float32Array(UNIFORM_FLOATS),
       bindGroup: null,
       bindGroupVolumeId: null,
+      bindGroupSegView: null,
     });
   }
 
@@ -149,18 +217,33 @@ export class GPURenderer implements Renderer {
       const volumeResource = this.volumes.get(viewport.volume.id);
       if (!resource || !volumeResource) continue;
 
-      if (resource.bindGroup === null || resource.bindGroupVolumeId !== viewport.volume.id) {
+      const segView = volumeResource.segView ?? this.emptySegView;
+      if (
+        resource.bindGroup === null ||
+        resource.bindGroupVolumeId !== viewport.volume.id ||
+        resource.bindGroupSegView !== segView
+      ) {
         resource.bindGroup = this.device.createBindGroup({
           layout: this.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: resource.uniformBuffer } },
             { binding: 1, resource: volumeResource.view },
+            { binding: 2, resource: segView },
+            { binding: 3, resource: { buffer: volumeResource.labelBuffer } },
           ],
         });
         resource.bindGroupVolumeId = viewport.volume.id;
+        resource.bindGroupSegView = segView;
       }
 
-      writeUniforms(resource.uniformData, viewport);
+      const segmentation = viewport.volume.segmentation;
+      if (volumeResource.labelVersion !== segmentation.labelVersion) {
+        this.device.queue.writeBuffer(volumeResource.labelBuffer, 0, labelData(segmentation));
+        volumeResource.labelVersion = segmentation.labelVersion;
+      }
+
+      const segEnabled = viewport.segmentationVisible && volumeResource.segTexture !== null;
+      writeUniforms(resource.uniformData, viewport, segEnabled);
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
 
       const pass = encoder.beginRenderPass({
@@ -186,13 +269,32 @@ export class GPURenderer implements Renderer {
 
   destroy(): void {
     for (const id of this.viewports.keys()) this.destroyViewport(id);
-    for (const resource of this.volumes.values()) resource.texture.destroy();
+    for (const resource of this.volumes.values()) {
+      resource.texture.destroy();
+      resource.segTexture?.destroy();
+      resource.labelBuffer.destroy();
+    }
     this.volumes.clear();
+    this.emptySegTexture.destroy();
     this.device.destroy();
   }
 }
 
-function writeUniforms(arr: Float32Array, viewport: Viewport): void {
+function labelData(segmentation: Segmentation): Float32Array {
+  const data = new Float32Array(LABEL_FLOATS);
+  for (let segment = 1; segment < 256; segment++) {
+    const style = segmentation.getLabelStyle(segment);
+    if (!style.visible) continue;
+    const offset = segment * 4;
+    data[offset] = style.color[0];
+    data[offset + 1] = style.color[1];
+    data[offset + 2] = style.color[2];
+    data[offset + 3] = style.opacity;
+  }
+  return data;
+}
+
+function writeUniforms(arr: Float32Array, viewport: Viewport, segEnabled: boolean): void {
   const camera = viewport.camera;
   const { right, trueUp, normal } = camera.basis();
   const geometry = viewport.volume.geometry;
@@ -238,6 +340,7 @@ function writeUniforms(arr: Float32Array, viewport: Viewport): void {
   arr[28] = origin[0];
   arr[29] = origin[1];
   arr[30] = origin[2];
+  arr[31] = segEnabled ? 1 : 0;
   arr[32] = spacing[0];
   arr[33] = spacing[1];
   arr[34] = spacing[2];
