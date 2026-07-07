@@ -158,20 +158,20 @@ Slots store the **full set** present at a voxel. Segmentation textures are point
 
 ### 6.2 Label table
 
-A 256-entry table holds per-segment style — color (rgb), opacity, and visibility — shared across all viewports showing the segmentation. The segmentation exposes its owning volume, an editor, and the means to read and write label styles and to list the segments currently present.
+A 256-entry table holds per-segment style — color (rgb), fill opacity, and visibility — shared across all viewports showing the segmentation. The segmentation exposes its owning volume, an editor, and the means to read and write label styles and to list the segments currently present.
 
 ### 6.3 Compositing rule
 
-At each sample, the rendered segment is the **highest-index segment among visible segments** in the voxel's slot set. Higher index draws on top. A voxel contributes one segment color (blended over the grayscale sample by that segment's opacity), or nothing if all its segments are hidden or empty.
+At each sample, **every visible segment** in the voxel's slot set contributes. A segment renders as a **quasi-opaque border with a transparent fill**: a voxel on the segment's boundary in the view plane (any in-plane neighbor lacking the segment) contributes at near-full opacity (α ≈ 0.9), interior voxels at the segment's label opacity. Segments blend **additively**: each contributing segment adds its premultiplied color (`color × α`), the summed color is clamped, and coverage accumulates as `1 − Π(1 − αₛ)`. Where segments overlap the sums brighten and shift hue, so overlap is directly visible. The combined color is blended over the grayscale sample by the accumulated coverage; a voxel whose segments are all hidden (or empty) contributes nothing.
 
-Full storage of the slot set (rather than a precomputed max) is what allows a higher segment to be erased or hidden and the next-highest to render. The compositing function is isolated, so it's easy to replace later.
+Full storage of the slot set (rather than a precomputed composite) is what allows a segment to be erased or hidden and the remaining segments to keep rendering. The compositing function is isolated, so it's easy to replace later.
 
 ### 6.4 Editing
 
 Editing operations write voxel slot sets into the CPU-resident brick store, then mark the affected bricks dirty; the active renderer syncs them — the `GPURenderer` re-uploads only dirty bricks, the `CPURenderer` reads them in place.
 
 - **Paint segment `s`** over a brush region: allocate brick if **Absent**; add `s` to each voxel's slot set (fill an empty slot).
-- **Erase segment `s`**: clear the slot holding `s`. The next-highest visible segment renders automatically.
+- **Erase segment `s`**: clear the slot holding `s`. The remaining segments render automatically.
 - **Slots full** (a (K+1)th overlap at a voxel): evict the lowest index (default policy).
 - **Undo/redo**: snapshot dirty bricks before a stroke; restore at brick granularity.
 
@@ -390,9 +390,12 @@ The published artifact is `dist/` (`index.js` + `index.d.ts`); only `src/` is sh
 | Brick size                     | 32³ voxels                                                          |
 | Segmentation overlap depth (K) | 4 (`rgba8uint`)                                                     |
 | Distinct segment indices       | 256 (1–255; 0 = empty)                                              |
-| Overlap compositing            | Highest visible index wins                                          |
+| Overlap compositing            | Additive — every visible segment contributes                        |
+| Segment border                 | Quasi-opaque (α ≈ 0.9), one voxel, in the view plane                |
+| Segment fill opacity           | 0.2 (per-segment, from the label table)                             |
 | Slot overflow policy           | Evict lowest index                                                  |
 | Segmentation sampling          | Nearest (point)                                                     |
+| Segmentation visibility        | Visible (per viewport, toggleable)                                  |
 | Image sampling                 | Linear                                                              |
 | Loading                        | Progressive, full slice by slice, always                            |
 | Projection                     | Orthographic, always                                                |
@@ -402,7 +405,7 @@ The published artifact is `dist/` (`index.js` + `index.d.ts`); only `src/` is sh
 
 ## 18. Implementation status
 
-The codebase currently implements the **minimal grayscale rendering path** end to end: load a volume from geometry, stream its slices, and render it in orthographic slab viewports through the `GPURenderer`. Everything below conforms to the model defined above; the rest of the surface is not built yet.
+The codebase currently implements the **minimal grayscale rendering path** end to end — load a volume from geometry, stream its slices, and render it in orthographic slab viewports through the `GPURenderer` — plus the **segmentation model and its rendering**. Everything below conforms to the model defined above; the rest of the surface is not built yet.
 
 ### 18.1 Implemented
 
@@ -414,13 +417,17 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 - **RenderingEngine** (§10): singleton module accessor + one-time async init, `createVolume` / `createViewport`, volume and viewport destruction (a volume referenced by a live viewport is rejected), full engine teardown (stops the loop, releases resources, destroys the renderer, resets the singleton), and a `requestAnimationFrame` loop that uploads dirty bricks and redraws dirty viewports.
 - **GPURenderer** (§7, §14): WebGPU orthographic slab raycast in WGSL, one canvas context per viewport, per-brick texture upload.
 - **Blend modes** (§7.3): MIP, MinIP, Average. Composite is a basic front-to-back accumulation (grayscale used as opacity).
+- **Segmentation** (§6.1–6.2): built-in 1:1 segmentation per volume with K=4 slot sets, sphere paint writes with slot-overflow eviction (lowest index), present-segment listing, a 256-entry label table (color / opacity / visibility, versioned), and dirty-brick sync through the renderer contract.
+- **Segmentation rendering** (§6.3): point-sampled slot sets composited in the raycast shader — quasi-opaque border where an in-plane neighbor lacks the segment, transparent fill inside, every visible segment blended additively, accumulated front-to-back along the slab and blended over the grayscale sample — with a per-viewport visibility toggle.
 
 ### 18.2 Simplifications
 
 - The CPU brick store keeps a **dense** voxel array; the page table tracks residency for streaming and dirty-region upload rather than backing a packed sparse pool.
 - The `GPURenderer` mirrors each volume into a single dense **`r32float` 3D texture** (not an atlas); resident bricks are written as texture sub-regions. Image sampling is trilinear via `textureLoad` (no sampler), satisfying the Linear default. Because a dense volume and the staging for its brick uploads can be large, the device is requested with the adapter's maximum `maxBufferSize` and `maxTextureDimension3D` rather than the conservative defaults.
+- The segmentation store is likewise a dense slot-set array (4 bytes/voxel); the `GPURenderer` mirrors it into a dense **`rgba8uint` 3D texture** created lazily on the first paint, with the label table in a per-volume uniform buffer re-uploaded when its version changes.
+- Voxel writes are exposed directly on the segmentation (sphere paint); the editor abstraction (§6.4 — active segment, erase, stroke grouping, undo/redo) is not built yet.
 - The scheduler (§5.4) is not prioritized: arrivals are coalesced into per-frame dirty-brick uploads in slice order.
 
 ### 18.3 Not yet implemented
 
-Segmentation (§6) and its editing/prompt tools, all camera/annotation tools and the SVG overlay (§11, §12), events (§13), the prioritized scheduler (§5.4), the `CPURenderer` (§7.1), and the `GPURenderer` compute fast paths — gradient precompute and histogram auto window/level (§7.1, §15).
+The segmentation editor (§6.4 — erase, stroke grouping, undo/redo) and the editing/prompt tools (§11.3–11.4), all camera/annotation tools and the SVG overlay (§11, §12), events (§13), the prioritized scheduler (§5.4), the `CPURenderer` (§7.1), and the `GPURenderer` compute fast paths — gradient precompute and histogram auto window/level (§7.1, §15).
