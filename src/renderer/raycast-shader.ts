@@ -1,4 +1,41 @@
-export const RAYCAST_SHADER = /* wgsl */ `
+const HARDWARE_TRILINEAR = /* wgsl */ `
+@group(0) @binding(5) var volumeSampler: sampler;
+
+fn sampleTrilinear(q: vec3<f32>) -> f32 {
+  return textureSampleLevel(volume, volumeSampler, (q + vec3<f32>(0.5)) / U.dims, 0.0).r;
+}
+`;
+
+const MANUAL_TRILINEAR = /* wgsl */ `
+fn loadVoxel(c: vec3<i32>, maxIndex: vec3<i32>) -> f32 {
+  let clamped = clamp(c, vec3<i32>(0), maxIndex);
+  return textureLoad(volume, clamped, 0).r;
+}
+
+fn sampleTrilinear(q: vec3<f32>) -> f32 {
+  let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
+  let base = vec3<i32>(floor(q));
+  let f = q - floor(q);
+  let c000 = loadVoxel(base + vec3<i32>(0, 0, 0), maxIndex);
+  let c100 = loadVoxel(base + vec3<i32>(1, 0, 0), maxIndex);
+  let c010 = loadVoxel(base + vec3<i32>(0, 1, 0), maxIndex);
+  let c110 = loadVoxel(base + vec3<i32>(1, 1, 0), maxIndex);
+  let c001 = loadVoxel(base + vec3<i32>(0, 0, 1), maxIndex);
+  let c101 = loadVoxel(base + vec3<i32>(1, 0, 1), maxIndex);
+  let c011 = loadVoxel(base + vec3<i32>(0, 1, 1), maxIndex);
+  let c111 = loadVoxel(base + vec3<i32>(1, 1, 1), maxIndex);
+  let x00 = mix(c000, c100, f.x);
+  let x10 = mix(c010, c110, f.x);
+  let x01 = mix(c001, c101, f.x);
+  let x11 = mix(c011, c111, f.x);
+  let y0 = mix(x00, x10, f.y);
+  let y1 = mix(x01, x11, f.y);
+  return mix(y0, y1, f.z);
+}
+`;
+
+export function raycastShader(filterableVolume: boolean): string {
+  return /* wgsl */ `
 struct Uniforms {
   right: vec3<f32>,
   halfWidth: f32,
@@ -57,33 +94,7 @@ fn worldToIndex(p: vec3<f32>) -> vec3<f32> {
     dot(rel, U.dirCol2) / U.spacing.z,
   );
 }
-
-fn loadVoxel(c: vec3<i32>, maxIndex: vec3<i32>) -> f32 {
-  let clamped = clamp(c, vec3<i32>(0), maxIndex);
-  return textureLoad(volume, clamped, 0).r;
-}
-
-fn sampleTrilinear(q: vec3<f32>) -> f32 {
-  let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
-  let base = vec3<i32>(floor(q));
-  let f = q - floor(q);
-  let c000 = loadVoxel(base + vec3<i32>(0, 0, 0), maxIndex);
-  let c100 = loadVoxel(base + vec3<i32>(1, 0, 0), maxIndex);
-  let c010 = loadVoxel(base + vec3<i32>(0, 1, 0), maxIndex);
-  let c110 = loadVoxel(base + vec3<i32>(1, 1, 0), maxIndex);
-  let c001 = loadVoxel(base + vec3<i32>(0, 0, 1), maxIndex);
-  let c101 = loadVoxel(base + vec3<i32>(1, 0, 1), maxIndex);
-  let c011 = loadVoxel(base + vec3<i32>(0, 1, 1), maxIndex);
-  let c111 = loadVoxel(base + vec3<i32>(1, 1, 1), maxIndex);
-  let x00 = mix(c000, c100, f.x);
-  let x10 = mix(c010, c110, f.x);
-  let x01 = mix(c001, c101, f.x);
-  let x11 = mix(c011, c111, f.x);
-  let y0 = mix(x00, x10, f.y);
-  let y1 = mix(x01, x11, f.y);
-  return mix(y0, y1, f.z);
-}
-
+${filterableVolume ? HARDWARE_TRILINEAR : MANUAL_TRILINEAR}
 const BORDER_ALPHA = 0.9;
 const SEG_ISO = 0.5;
 const SEG_ISO_INNER = 0.82;
@@ -245,13 +256,41 @@ fn applyWindow(value: f32) -> f32 {
   return clamp((value - low) / U.windowWidth, 0.0, 1.0);
 }
 
+fn clipAxis(startC: f32, dirC: f32, hiC: f32, t: vec2<f32>) -> vec2<f32> {
+  if (abs(dirC) < 1e-6) {
+    if (startC < 0.0 || startC > hiC) {
+      return vec2<f32>(1.0, 0.0);
+    }
+    return t;
+  }
+  let a = (0.0 - startC) / dirC;
+  let b = (hiC - startC) / dirC;
+  return vec2<f32>(max(t.x, min(a, b)), min(t.y, max(a, b)));
+}
+
 @fragment
 fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   let plane = U.focalPoint + U.right * (in.uv.x * U.halfWidth) + U.trueUp * (in.uv.y * U.halfHeight);
   let count = max(u32(U.sampleCount), 1u);
-  let start = plane - U.normal * (U.slabThickness * 0.5);
+  let qStart = worldToIndex(plane - U.normal * (U.slabThickness * 0.5));
+  let qDir = worldDirToIndex(U.normal) * U.slabThickness;
   let rightStep = planeStep(U.right);
   let upStep = planeStep(U.trueUp);
+
+  var iLo = 0u;
+  var iHi = count - 1u;
+  if (count > 1u) {
+    var t = vec2<f32>(0.0, 1.0);
+    t = clipAxis(qStart.x, qDir.x, U.dims.x - 1.0, t);
+    t = clipAxis(qStart.y, qDir.y, U.dims.y - 1.0, t);
+    t = clipAxis(qStart.z, qDir.z, U.dims.z - 1.0, t);
+    if (t.x > t.y) {
+      return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let scale = f32(count - 1u);
+    iLo = u32(max(ceil(t.x * scale) - 1.0, 0.0));
+    iHi = u32(min(floor(t.y * scale) + 1.0, scale));
+  }
 
   let mode = u32(U.blendMode);
   var maxValue = -3.0e38;
@@ -265,36 +304,30 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   var lastBrick = vec3<i32>(-2);
   var brickMin = 0.0;
   var brickMax = 0.0;
+  var segOccupied = 0.0;
   var debugAlpha = 0.0;
 
-  for (var i = 0u; i < count; i = i + 1u) {
+  for (var i = iLo; i <= iHi; i = i + 1u) {
+    if (mode == 3u && U.debugEmptyBlocks < 0.5 && compositeAlpha > 0.995
+      && (U.segEnabled < 0.5 || segAlpha > 0.995)) {
+      break;
+    }
     var frac = 0.5;
     if (count > 1u) {
       frac = f32(i) / f32(count - 1u);
     }
-    let pos = start + U.normal * (U.slabThickness * frac);
-    let q = worldToIndex(pos);
+    let q = qStart + qDir * frac;
     if (!inBounds(q)) {
       continue;
     }
     inBoundsCount = inBoundsCount + 1.0;
-
-    if (U.segEnabled > 0.5) {
-      var seg = vec4<f32>(0.0);
-      if (U.segAntialias > 0.5) {
-        seg = sampleSegmentationAntialiased(q, rightStep, upStep);
-      } else {
-        seg = sampleSegmentation(q, rightStep, upStep);
-      }
-      segColor = segColor + (1.0 - segAlpha) * seg.rgb;
-      segAlpha = segAlpha + (1.0 - segAlpha) * seg.a;
-    }
 
     let bc = brickCoord(q);
     if (any(bc != lastBrick)) {
       let r = textureLoad(brickRange, bc, 0);
       brickMin = r.x;
       brickMax = r.y;
+      segOccupied = r.z;
       lastBrick = bc;
     }
     if (U.debugEmptyBlocks > 0.5 && applyWindow(brickMax) <= 0.0) {
@@ -309,11 +342,23 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
         debugAlpha = debugAlpha + (1.0 - debugAlpha);
       }
     }
+
+    if (U.segEnabled > 0.5 && segOccupied > 0.5 && segAlpha < 0.995) {
+      var seg = vec4<f32>(0.0);
+      if (U.segAntialias > 0.5) {
+        seg = sampleSegmentationAntialiased(q, rightStep, upStep);
+      } else {
+        seg = sampleSegmentation(q, rightStep, upStep);
+      }
+      segColor = segColor + (1.0 - segAlpha) * seg.rgb;
+      segAlpha = segAlpha + (1.0 - segAlpha) * seg.a;
+    }
+
     if (mode == 0u && brickMax <= maxValue) {
       continue;
     } else if (mode == 1u && brickMin >= minValue) {
       continue;
-    } else if (mode == 3u && applyWindow(brickMax) <= 0.0) {
+    } else if (mode == 3u && (applyWindow(brickMax) <= 0.0 || compositeAlpha > 0.995)) {
       continue;
     }
 
@@ -324,11 +369,6 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
     let gray = applyWindow(value);
     compositeColor = compositeColor + (1.0 - compositeAlpha) * gray * gray;
     compositeAlpha = compositeAlpha + (1.0 - compositeAlpha) * gray;
-
-    if (mode == 3u && U.debugEmptyBlocks < 0.5 && compositeAlpha > 0.995
-      && (U.segEnabled < 0.5 || segAlpha > 0.995)) {
-      break;
-    }
   }
 
   if (inBoundsCount == 0.0) {
@@ -352,3 +392,4 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   return vec4<f32>(rgb, 1.0);
 }
 `;
+}

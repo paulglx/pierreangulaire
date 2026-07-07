@@ -2,18 +2,20 @@ import { dot } from '../math';
 import type { Segmentation } from '../segmentation';
 import type { Viewport } from '../viewport';
 import type { Volume } from '../volume';
-import { RAYCAST_SHADER } from './raycast-shader';
+import { raycastShader } from './raycast-shader';
 import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 48;
-const MAX_SAMPLES = 512;
 const LABEL_FLOATS = 256 * 4;
+const RANGE_FLOATS = 4;
 
 interface VolumeResource {
   texture: GPUTexture;
   view: GPUTextureView;
   rangeTexture: GPUTexture;
   rangeView: GPUTextureView;
+  rangeData: Float32Array;
+  segOccupancy: Uint8Array;
   segTexture: GPUTexture | null;
   segView: GPUTextureView | null;
   labelBuffer: GPUBuffer;
@@ -36,6 +38,7 @@ export class GPURenderer implements Renderer {
   private bindGroupLayout!: GPUBindGroupLayout;
   private emptySegTexture!: GPUTexture;
   private emptySegView!: GPUTextureView;
+  private volumeSampler: GPUSampler | null = null;
 
   private readonly volumes = new Map<string, VolumeResource>();
   private readonly viewports = new Map<string, ViewportResource>();
@@ -48,44 +51,58 @@ export class GPURenderer implements Renderer {
     if (!adapter) {
       throw new Error('No WebGPU adapter found.');
     }
+    const filterable = adapter.features.has('float32-filterable');
     this.device = await adapter.requestDevice({
+      requiredFeatures: filterable ? ['float32-filterable'] : [],
       requiredLimits: {
         maxBufferSize: adapter.limits.maxBufferSize,
         maxTextureDimension3D: adapter.limits.maxTextureDimension3D,
       },
     });
     this.format = navigator.gpu.getPreferredCanvasFormat();
+    if (filterable) {
+      this.volumeSampler = this.device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    }
 
-    const module = this.device.createShaderModule({ code: RAYCAST_SHADER });
-    this.bindGroupLayout = this.device.createBindGroupLayout({
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-          buffer: { type: 'uniform' },
+    const module = this.device.createShaderModule({ code: raycastShader(filterable) });
+    const layoutEntries: GPUBindGroupLayoutEntry[] = [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform' },
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: {
+          sampleType: filterable ? 'float' : 'unfilterable-float',
+          viewDimension: '3d',
         },
-        {
-          binding: 1,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: 'unfilterable-float', viewDimension: '3d' },
-        },
-        {
-          binding: 2,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: 'uint', viewDimension: '3d' },
-        },
-        {
-          binding: 3,
-          visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: 'uniform' },
-        },
-        {
-          binding: 4,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: 'unfilterable-float', viewDimension: '3d' },
-        },
-      ],
-    });
+      },
+      {
+        binding: 2,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: 'uint', viewDimension: '3d' },
+      },
+      {
+        binding: 3,
+        visibility: GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform' },
+      },
+      {
+        binding: 4,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: 'unfilterable-float', viewDimension: '3d' },
+      },
+    ];
+    if (filterable) {
+      layoutEntries.push({
+        binding: 5,
+        visibility: GPUShaderStage.FRAGMENT,
+        sampler: { type: 'filtering' },
+      });
+    }
+    this.bindGroupLayout = this.device.createBindGroupLayout({ entries: layoutEntries });
     this.emptySegTexture = this.device.createTexture({
       size: { width: 1, height: 1, depthOrArrayLayers: 1 },
       dimension: '3d',
@@ -114,10 +131,11 @@ export class GPURenderer implements Renderer {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     const [nbx, nby, nbz] = volume.store.bricksPerAxis;
+    const brickCount = nbx * nby * nbz;
     const rangeTexture = this.device.createTexture({
       size: { width: nbx, height: nby, depthOrArrayLayers: nbz },
       dimension: '3d',
-      format: 'rg32float',
+      format: 'rgba32float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     this.volumes.set(volume.id, {
@@ -125,6 +143,8 @@ export class GPURenderer implements Renderer {
       view: texture.createView(),
       rangeTexture,
       rangeView: rangeTexture.createView(),
+      rangeData: new Float32Array(brickCount * RANGE_FLOATS),
+      segOccupancy: new Uint8Array(brickCount),
       segTexture: null,
       segView: null,
       labelBuffer: this.device.createBuffer({
@@ -155,8 +175,6 @@ export class GPURenderer implements Renderer {
   uploadBricks(volume: Volume, brickIndices: number[]): void {
     const resource = this.volumes.get(volume.id);
     if (!resource) return;
-    const [nbx, nby] = volume.store.bricksPerAxis;
-    const range = new Float32Array(2);
     for (const index of brickIndices) {
       const brick = volume.store.readBrick(index);
       const [w, h, d] = brick.size;
@@ -169,21 +187,9 @@ export class GPURenderer implements Renderer {
         { bytesPerRow: w * 4, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
       );
-      range[0] = brick.min;
-      range[1] = brick.max;
-      this.device.queue.writeTexture(
-        {
-          texture: resource.rangeTexture,
-          origin: {
-            x: index % nbx,
-            y: Math.floor(index / nbx) % nby,
-            z: Math.floor(index / (nbx * nby)),
-          },
-        },
-        range,
-        { bytesPerRow: 8, rowsPerImage: 1 },
-        { width: 1, height: 1, depthOrArrayLayers: 1 },
-      );
+      resource.rangeData[index * RANGE_FLOATS] = brick.min;
+      resource.rangeData[index * RANGE_FLOATS + 1] = brick.max;
+      this.writeRangeTexel(resource, volume.store.bricksPerAxis, index);
     }
   }
 
@@ -200,6 +206,8 @@ export class GPURenderer implements Renderer {
       });
       resource.segView = resource.segTexture.createView();
     }
+    const grid = volume.segmentation.bricksPerAxis;
+    const changed: number[] = [];
     for (const index of brickIndices) {
       const brick = volume.segmentation.readBrick(index);
       const [w, h, d] = brick.size;
@@ -212,7 +220,48 @@ export class GPURenderer implements Renderer {
         { bytesPerRow: w * 4, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
       );
+      const occupied = hasLabels(brick.data);
+      if (resource.segOccupancy[index] !== occupied) {
+        resource.segOccupancy[index] = occupied;
+        changed.push(index);
+      }
     }
+    if (changed.length === 0) return;
+    const affected = new Set<number>();
+    for (const index of changed) {
+      for (const neighbor of brickNeighborhood(grid, index)) affected.add(neighbor);
+    }
+    for (const index of affected) {
+      let dilated = 0;
+      for (const neighbor of brickNeighborhood(grid, index)) {
+        dilated = Math.max(dilated, resource.segOccupancy[neighbor]!);
+      }
+      if (resource.rangeData[index * RANGE_FLOATS + 2] !== dilated) {
+        resource.rangeData[index * RANGE_FLOATS + 2] = dilated;
+        this.writeRangeTexel(resource, grid, index);
+      }
+    }
+  }
+
+  private writeRangeTexel(
+    resource: VolumeResource,
+    grid: readonly [number, number, number],
+    index: number,
+  ): void {
+    const [nbx, nby] = grid;
+    this.device.queue.writeTexture(
+      {
+        texture: resource.rangeTexture,
+        origin: {
+          x: index % nbx,
+          y: Math.floor(index / nbx) % nby,
+          z: Math.floor(index / (nbx * nby)),
+        },
+      },
+      resource.rangeData,
+      { offset: index * RANGE_FLOATS * 4, bytesPerRow: RANGE_FLOATS * 4, rowsPerImage: 1 },
+      { width: 1, height: 1, depthOrArrayLayers: 1 },
+    );
   }
 
   registerViewport(viewport: Viewport): void {
@@ -258,15 +307,19 @@ export class GPURenderer implements Renderer {
         resource.bindGroupVolumeId !== viewport.volume.id ||
         resource.bindGroupSegView !== segView
       ) {
+        const entries: GPUBindGroupEntry[] = [
+          { binding: 0, resource: { buffer: resource.uniformBuffer } },
+          { binding: 1, resource: volumeResource.view },
+          { binding: 2, resource: segView },
+          { binding: 3, resource: { buffer: volumeResource.labelBuffer } },
+          { binding: 4, resource: volumeResource.rangeView },
+        ];
+        if (this.volumeSampler) {
+          entries.push({ binding: 5, resource: this.volumeSampler });
+        }
         resource.bindGroup = this.device.createBindGroup({
           layout: this.bindGroupLayout,
-          entries: [
-            { binding: 0, resource: { buffer: resource.uniformBuffer } },
-            { binding: 1, resource: volumeResource.view },
-            { binding: 2, resource: segView },
-            { binding: 3, resource: { buffer: volumeResource.labelBuffer } },
-            { binding: 4, resource: volumeResource.rangeView },
-          ],
+          entries,
         });
         resource.bindGroupVolumeId = viewport.volume.id;
         resource.bindGroupSegView = segView;
@@ -323,6 +376,29 @@ export class GPURenderer implements Renderer {
   }
 }
 
+function hasLabels(data: Uint8Array): number {
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] !== 0) return 1;
+  }
+  return 0;
+}
+
+function brickNeighborhood(grid: readonly [number, number, number], index: number): number[] {
+  const [nbx, nby, nbz] = grid;
+  const bx = index % nbx;
+  const by = Math.floor(index / nbx) % nby;
+  const bz = Math.floor(index / (nbx * nby));
+  const out: number[] = [];
+  for (let z = Math.max(0, bz - 1); z <= Math.min(nbz - 1, bz + 1); z++) {
+    for (let y = Math.max(0, by - 1); y <= Math.min(nby - 1, by + 1); y++) {
+      for (let x = Math.max(0, bx - 1); x <= Math.min(nbx - 1, bx + 1); x++) {
+        out.push(x + y * nbx + z * nbx * nby);
+      }
+    }
+  }
+  return out;
+}
+
 function labelData(segmentation: Segmentation): Float32Array {
   const data = new Float32Array(LABEL_FLOATS);
   for (let segment = 1; segment < 256; segment++) {
@@ -350,13 +426,14 @@ function writeUniforms(
   const aspect = viewport.canvas.width / viewport.canvas.height;
   const halfHeight = camera.zoom;
   const halfWidth = camera.zoom * aspect;
-  const minSpacing = Math.min(...geometry.spacing);
-  const sampleCount = Math.min(
-    MAX_SAMPLES,
-    Math.max(1, Math.ceil(viewport.slabThickness / minSpacing)),
-  );
   const { focalPoint } = camera;
   const { direction, origin, spacing, dims } = geometry;
+  const samplesPerWorld = Math.hypot(
+    dot(normal, direction[0]) / spacing[0],
+    dot(normal, direction[1]) / spacing[1],
+    dot(normal, direction[2]) / spacing[2],
+  );
+  const sampleCount = Math.max(1, Math.ceil(viewport.slabThickness * samplesPerWorld));
 
   arr[0] = right[0];
   arr[1] = right[1];
