@@ -88,9 +88,17 @@ test('paintSphere clamps to the volume bounds', () => {
 
 test('paintSphere rejects invalid segment indices', () => {
   const segmentation = new Segmentation(geometry, 8);
-  for (const segment of [0, 256, 1.5, -1]) {
+  for (const segment of [0, 65536, 1.5, -1]) {
     expect(() => segmentation.paintSphere([4, 4, 4], 1, segment)).toThrow(/Segment index/);
   }
+});
+
+test('paintSphere stores the maximum segment index intact', () => {
+  const segmentation = new Segmentation(geometry, 8);
+  segmentation.paintSphere([4, 4, 4], 1, 65535);
+
+  expect(slotsAt(segmentation, 4, 4, 4)).toEqual([65535, 0, 0, 0]);
+  expect(segmentation.segmentsPresent()).toEqual([65535]);
 });
 
 test('label styles default to distinct visible colors and can be edited', () => {
@@ -106,6 +114,20 @@ test('label styles default to distinct visible colors and can be edited', () => 
   segmentation.setLabelStyle(1, style);
   expect(segmentation.getLabelStyle(1)).toBe(style);
   expect(segmentation.labelVersion).toBe(1);
+});
+
+test('the packed label table tracks style edits', () => {
+  const segmentation = new Segmentation(geometry, 8);
+  const offset = 5 * 4;
+  expect(segmentation.labelTable[offset + 3]).toBeCloseTo(0.2);
+
+  segmentation.setLabelStyle(5, { color: [1, 0, 0], opacity: 0.8, visible: true });
+  expect(segmentation.labelTable[offset]).toBe(1);
+  expect(segmentation.labelTable[offset + 1]).toBe(0);
+  expect(segmentation.labelTable[offset + 3]).toBeCloseTo(0.8);
+
+  segmentation.setLabelStyle(5, { color: [1, 0, 0], opacity: 0.8, visible: false });
+  expect(segmentation.labelTable[offset + 3]).toBe(0);
 });
 
 test('bricks untouched by any paint read as empty and are never dirty', () => {

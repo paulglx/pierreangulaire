@@ -1,12 +1,10 @@
 import { dot } from '../math';
-import type { Segmentation } from '../segmentation';
 import type { Viewport } from '../viewport';
 import type { Volume } from '../volume';
 import { raycastShader, SEG_SLOTS_PER_AXIS, segmentationResolveShader } from './raycast-shader';
 import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 48;
-const LABEL_FLOATS = 256 * 4;
 const RANGE_FLOATS = 4;
 const SEG_SLOTS_PER_LAYER = SEG_SLOTS_PER_AXIS * SEG_SLOTS_PER_AXIS;
 
@@ -95,7 +93,7 @@ export class GPURenderer implements Renderer {
       {
         binding: 3,
         visibility: GPUShaderStage.FRAGMENT,
-        buffer: { type: 'uniform' },
+        buffer: { type: 'read-only-storage' },
       },
       {
         binding: 4,
@@ -114,7 +112,7 @@ export class GPURenderer implements Renderer {
     this.emptySegTexture = this.device.createTexture({
       size: { width: 1, height: 1, depthOrArrayLayers: 1 },
       dimension: '3d',
-      format: 'rgba8uint',
+      format: 'rgba16uint',
       usage: GPUTextureUsage.TEXTURE_BINDING,
     });
     this.emptySegView = this.emptySegTexture.createView();
@@ -124,7 +122,7 @@ export class GPURenderer implements Renderer {
       fragment: {
         module,
         entryPoint: 'fs',
-        targets: [{ format: this.format }, { format: 'rg32uint' }],
+        targets: [{ format: this.format }, { format: 'rgba32uint' }],
       },
       primitive: { topology: 'triangle-list' },
     });
@@ -145,7 +143,7 @@ export class GPURenderer implements Renderer {
         {
           binding: 2,
           visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: 'uniform' },
+          buffer: { type: 'read-only-storage' },
         },
       ],
     });
@@ -203,8 +201,8 @@ export class GPURenderer implements Renderer {
       segSlots: new Int32Array(brickCount).fill(-1),
       segSlotCount: 0,
       labelBuffer: this.device.createBuffer({
-        size: LABEL_FLOATS * 4,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        size: volume.segmentation.labelTable.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       }),
       labelVersion: -1,
     });
@@ -276,7 +274,7 @@ export class GPURenderer implements Renderer {
       this.device.queue.writeTexture(
         { texture: resource.segAtlas!, origin: slotOrigin(slot, brickSize) },
         brick.data,
-        { bytesPerRow: w * 4, rowsPerImage: h },
+        { bytesPerRow: w * 8, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
       );
       const occupied = hasLabels(brick.data);
@@ -347,7 +345,7 @@ export class GPURenderer implements Renderer {
         depthOrArrayLayers: layers * brickSize,
       },
       dimension: '3d',
-      format: 'rgba8uint',
+      format: 'rgba16uint',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
     });
     if (resource.segAtlas) {
@@ -435,7 +433,7 @@ export class GPURenderer implements Renderer {
 
       const segmentation = viewport.volume.segmentation;
       if (volumeResource.labelVersion !== segmentation.labelVersion) {
-        this.device.queue.writeBuffer(volumeResource.labelBuffer, 0, labelData(segmentation));
+        this.device.queue.writeBuffer(volumeResource.labelBuffer, 0, segmentation.labelTable);
         volumeResource.labelVersion = segmentation.labelVersion;
       }
 
@@ -459,7 +457,7 @@ export class GPURenderer implements Renderer {
         segTarget?.texture.destroy();
         const texture = this.device.createTexture({
           size: { width: canvasTexture.width, height: canvasTexture.height },
-          format: 'rg32uint',
+          format: 'rgba32uint',
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
         segTarget = { texture, view: texture.createView() };
@@ -542,7 +540,7 @@ function slotOrigin(slot: number, brickSize: number): GPUOrigin3DDict {
   };
 }
 
-function hasLabels(data: Uint8Array): number {
+function hasLabels(data: Uint16Array): number {
   for (let i = 0; i < data.length; i++) {
     if (data[i] !== 0) return 1;
   }
@@ -563,20 +561,6 @@ function brickNeighborhood(grid: readonly [number, number, number], index: numbe
     }
   }
   return out;
-}
-
-function labelData(segmentation: Segmentation): Float32Array {
-  const data = new Float32Array(LABEL_FLOATS);
-  for (let segment = 1; segment < 256; segment++) {
-    const style = segmentation.getLabelStyle(segment);
-    if (!style.visible) continue;
-    const offset = segment * 4;
-    data[offset] = style.color[0];
-    data[offset + 1] = style.color[1];
-    data[offset + 2] = style.color[2];
-    data[offset + 3] = style.opacity;
-  }
-  return data;
 }
 
 function writeUniforms(

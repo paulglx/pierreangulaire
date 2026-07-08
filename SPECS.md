@@ -48,7 +48,7 @@ A viewport references one image volume directly; that volume's built-in segmenta
 The library is a single TypeScript stack in three layers, top to bottom:
 
 1. **Application / public API** — the `RenderingEngine`, the viewports, the tools, the SVG overlay, the loaders and decode workers, and the `requestAnimationFrame` render loop. This is the surface consumers touch and the only layer that handles the DOM and input.
-2. **Renderer-agnostic state** — the single source of truth, held in plain TypeScript objects: the scene, the CPU-resident brick store (image and segmentation voxels as brick pool + page table), the camera, the 256-entry label table, and per-viewport window/level, blend mode, and slab thickness.
+2. **Renderer-agnostic state** — the single source of truth, held in plain TypeScript objects: the scene, the CPU-resident brick store (image and segmentation voxels as brick pool + page table), the camera, the 65,536-entry label table, and per-viewport window/level, blend mode, and slab thickness.
 3. **Renderer** — a swappable interface with exactly one active implementation, which turns the state above into pixels on each viewport canvas. Either the `GPURenderer` (WebGPU; the implemented backend, mirroring bricks into GPU textures and drawing via WGSL slab-raycast pipelines) or the `CPURenderer` (a worker-pool software raycaster that reads the brick store directly and blits pixels to the canvas; planned).
 
 The application layer drives the render loop and pushes state changes down; each frame it asks the active renderer to redraw the dirty viewports by id. Everything flows down through the renderer interface.
@@ -59,7 +59,7 @@ Everything is TypeScript. Responsibilities split between the renderer-agnostic c
 
 **Renderer-agnostic core** owns the single source of truth:
 
-- The scene and the CPU-resident **brick store** — the authoritative voxel data for every volume and segmentation (bricked), the page tables, and the 256-entry label table.
+- The scene and the CPU-resident **brick store** — the authoritative voxel data for every volume and segmentation (bricked), the page tables, and the 65,536-entry label table.
 - Camera state, window/level, blend mode, and slab thickness.
 - Voxel-write operations for segmentation editing, and on-demand voxel sampling.
 
@@ -148,19 +148,19 @@ Every image volume owns **exactly one** segmentation, created automatically when
 
 ### 6.1 Representation
 
-A segmentation supports up to **256 distinct segment indices** (1–255; 0 = empty) and an **overlap depth** of K segments per voxel (default 4).
+A segmentation supports up to **65,536 distinct segment indices** (1–65535; 0 = empty) and an **overlap depth** of K segments per voxel (default 4).
 
-Each voxel stores a **set of up to K segment indices** ("slots"), each a `u8`:
+Each voxel stores a **set of up to K segment indices** ("slots"), each a `u16`:
 
 | K (overlap depth) | Texture format | bytes/voxel | distinct labels |
 | ----------------- | -------------- | ----------- | --------------- |
-| 4                 | `rgba8uint`    | 4           | 256             |
+| 4                 | `rgba16uint`   | 8           | 65,536          |
 
 Slots store the **full set** present at a voxel. Segmentation textures are point-sampled. Segmentations use the same brick pool + page table as image volumes, so they are sparse: only bricks containing segmented voxels are allocated.
 
 ### 6.2 Label table
 
-A 256-entry table holds per-segment style — color (rgb), fill opacity, and visibility — shared across all viewports showing the segmentation. The segmentation exposes its owning volume, an editor, and the means to read and write label styles and to list the segments currently present.
+A 65,536-entry table holds per-segment style — color (rgb), fill opacity, and visibility — shared across all viewports showing the segmentation. The segmentation exposes its owning volume, an editor, and the means to read and write label styles and to list the segments currently present.
 
 ### 6.3 Compositing rule
 
@@ -198,7 +198,7 @@ Rendering goes through a swappable `Renderer` interface (§14). The `RenderingEn
 
 ### 7.2 Pipeline
 
-One algorithm in two passes: an **orthographic slab raycast** followed by a **screen-space overlay resolve**. In the raycast pass, parallel rays are cast along the `normal` vector and marched from the near slab plane to `near + slabThickness`, accumulated by the blend mode; grayscale is mapped via window/level. The same march projects the segmentation (§6.3): each sample contributes one point-sampled slot-set fetch, merged into the ray's set of up to 8 distinct visible segments, written alongside the grayscale to a screen-size integer target (`rg32uint`, 8 packed indices per pixel). The resolve pass then evaluates the compositing rule on that projected buffer — border test, optional antialiasing, additive blending — **once per pixel, in 2D**, and blends the overlay over the grayscale; it is skipped entirely when the segmentation is hidden. Overlay cost is therefore independent of slab thickness: the neighborhood work (border test, antialiasing kernel) never multiplies with the sample count. Absent/empty bricks are skipped; gradient-based shading is optional. Both renderers implement this same algorithm — the `GPURenderer` as WGSL pipelines, the `CPURenderer` as CPU kernels — and must produce pixel-consistent output (enforced by golden-image cross-tests).
+One algorithm in two passes: an **orthographic slab raycast** followed by a **screen-space overlay resolve**. In the raycast pass, parallel rays are cast along the `normal` vector and marched from the near slab plane to `near + slabThickness`, accumulated by the blend mode; grayscale is mapped via window/level. The same march projects the segmentation (§6.3): each sample contributes one point-sampled slot-set fetch, merged into the ray's set of up to 8 distinct visible segments, written alongside the grayscale to a screen-size integer target (`rgba32uint`, 8 packed 16-bit indices per pixel). The resolve pass then evaluates the compositing rule on that projected buffer — border test, optional antialiasing, additive blending — **once per pixel, in 2D**, and blends the overlay over the grayscale; it is skipped entirely when the segmentation is hidden. Overlay cost is therefore independent of slab thickness: the neighborhood work (border test, antialiasing kernel) never multiplies with the sample count. Absent/empty bricks are skipped; gradient-based shading is optional. Both renderers implement this same algorithm — the `GPURenderer` as WGSL pipelines, the `CPURenderer` as CPU kernels — and must produce pixel-consistent output (enforced by golden-image cross-tests).
 
 **Empty-space skipping.** For thick-slab and full-volume modes, marching every sample is dominated by trilinear fetches through regions that cannot affect the result. Each sample first consults its brick's value range (§5.1, cached across consecutive samples in the same brick — one lookup per brick boundary crossed) and skips the trilinear fetch when the brick cannot change the pixel under the current view state: for MIP when the brick max is at or below the running maximum, for MinIP when the brick min is at or above the running minimum, for Composite when the brick max maps below the window low (contributes zero). Average visits every sample (the mean depends on all of them). The skip never changes output: a value the gate skips at a brick boundary is captured where the ray passes through the brick that actually holds it.
 
@@ -408,8 +408,8 @@ The published artifact is `dist/` (`index.js` + `index.d.ts`); only `src/` is sh
 | ------------------------------ | ------------------------------------------------------------------- |
 | Renderer                       | Auto — `GPURenderer` (WebGPU) when available; `CPURenderer` planned |
 | Brick size                     | 32³ voxels                                                          |
-| Segmentation overlap depth (K) | 4 (`rgba8uint`)                                                     |
-| Distinct segment indices       | 256 (1–255; 0 = empty)                                              |
+| Segmentation overlap depth (K) | 4 (`rgba16uint`)                                                    |
+| Distinct segment indices       | 65,536 (1–65535; 0 = empty)                                         |
 | Overlap compositing            | Additive — every visible segment contributes                        |
 | Segment border                 | Quasi-opaque (α ≈ 0.9), 1.25 voxels wide, in the view plane         |
 | Segment fill opacity           | 0.2 (per-segment, from the label table)                             |
@@ -439,7 +439,7 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 - **GPURenderer** (§7, §14): WebGPU orthographic slab raycast in WGSL, one canvas context per viewport, per-brick texture upload.
 - **Blend modes** (§7.3): MIP, MinIP, Average. Composite is a basic front-to-back accumulation (grayscale used as opacity).
 - **Empty-space skipping, segmentation-space skipping & early ray termination** (§5.1, §7.2): a small `rgba32float` 3D texture (one texel per brick) carries the per-image-brick min/max value range, computed on residency, plus a segmentation occupancy flag dilated by one brick and the brick's segmentation atlas slot, maintained on segmentation upload; the range gates the per-sample trilinear fetch per blend mode against the live window/level, the occupancy flag gates all segmentation sampling, and rays are clipped analytically to the volume bounds before marching. When a brick is gated on both counts the ray leaps to its exit instead of stepping through it (§7.2). Composite additionally stops image accumulation once opacity saturates and terminates the ray once the per-ray segment set is also full. A per-viewport **empty-block debug toggle** (§9) draws these skipped bricks as a pink wireframe.
-- **Segmentation** (§6.1–6.2): built-in 1:1 segmentation per volume with K=4 slot sets, stored sparsely — CPU voxels live in per-brick arrays allocated on first paint, and the `GPURenderer` packs painted bricks into a **`rgba8uint` slot atlas** (created on first paint, grown by extending its depth and copying) addressed through a per-brick slot entry carried in the brick-range texture's free channel, so an untouched segmentation allocates no voxel storage. Sphere paint writes with slot-overflow eviction (lowest index), present-segment listing, a 256-entry label table (color / opacity / visibility, versioned) mirrored to a per-volume uniform buffer re-uploaded when its version changes, and dirty-brick sync through the renderer contract.
+- **Segmentation** (§6.1–6.2): built-in 1:1 segmentation per volume with K=4 slot sets, stored sparsely — CPU voxels live in per-brick arrays allocated on first paint, and the `GPURenderer` packs painted bricks into a **`rgba16uint` slot atlas** (created on first paint, grown by extending its depth and copying) addressed through a per-brick slot entry carried in the brick-range texture's free channel, so an untouched segmentation allocates no voxel storage. Sphere paint writes with slot-overflow eviction (lowest index), present-segment listing, a 65,536-entry label table (color / opacity / visibility, versioned) maintained as a packed array mirrored to a per-volume storage buffer re-uploaded when its version changes, and dirty-brick sync through the renderer contract.
 - **Segmentation rendering** (§6.3): point-sampled slot sets composited in the raycast shader — quasi-opaque border (1.25 voxels wide) where an in-plane neighbor lacks the segment, transparent fill inside, every visible segment blended additively, accumulated front-to-back along the slab and blended over the grayscale sample — with per-viewport visibility and antialiasing toggles (antialiasing derives a smooth silhouette and outline from a grid-anchored, continuous blurred coverage field with a screen-space-adaptive edge, on by default).
 
 ### 18.2 Simplifications

@@ -3,7 +3,7 @@ import { type VolumeGeometry, worldToIndex } from './geometry';
 import type { Vec3 } from './math';
 
 export const OVERLAP_DEPTH = 4;
-const SEGMENT_COUNT = 256;
+const SEGMENT_COUNT = 65536;
 
 export interface LabelStyle {
   readonly color: readonly [number, number, number];
@@ -14,7 +14,7 @@ export interface LabelStyle {
 export interface SegmentationBrickRegion {
   readonly origin: readonly [number, number, number];
   readonly size: readonly [number, number, number];
-  readonly data: Uint8Array;
+  readonly data: Uint16Array;
 }
 
 function hslColor(
@@ -30,16 +30,28 @@ function hslColor(
   return [channel(0), channel(8), channel(4)];
 }
 
-function defaultStyles(): LabelStyle[] {
-  const styles: LabelStyle[] = [];
-  for (let segment = 0; segment < SEGMENT_COUNT; segment++) {
-    styles.push({
-      color: hslColor((segment * 137.508) % 360, 0.8, 0.6),
-      opacity: 0.2,
-      visible: true,
-    });
+function defaultStyle(segment: number): LabelStyle {
+  return {
+    color: hslColor((segment * 137.508) % 360, 0.8, 0.6),
+    opacity: 0.2,
+    visible: true,
+  };
+}
+
+let sharedDefaultTable: Float32Array | null = null;
+
+function defaultLabelTable(): Float32Array {
+  if (sharedDefaultTable) return sharedDefaultTable;
+  sharedDefaultTable = new Float32Array(SEGMENT_COUNT * 4);
+  for (let segment = 1; segment < SEGMENT_COUNT; segment++) {
+    const { color, opacity } = defaultStyle(segment);
+    const offset = segment * 4;
+    sharedDefaultTable[offset] = color[0];
+    sharedDefaultTable[offset + 1] = color[1];
+    sharedDefaultTable[offset + 2] = color[2];
+    sharedDefaultTable[offset + 3] = opacity;
   }
-  return styles;
+  return sharedDefaultTable;
 }
 
 export class Segmentation {
@@ -47,8 +59,9 @@ export class Segmentation {
   readonly brickSize: number;
   readonly bricksPerAxis: readonly [number, number, number];
 
-  private readonly bricks: (Uint8Array | null)[];
-  private readonly styles: LabelStyle[];
+  private readonly bricks: (Uint16Array | null)[];
+  private readonly styles = new Map<number, LabelStyle>();
+  private readonly labels: Float32Array;
   private readonly voxelsPerSegment = new Uint32Array(SEGMENT_COUNT);
   private readonly dirty = new Set<number>();
   private version = 0;
@@ -59,19 +72,32 @@ export class Segmentation {
     this.bricksPerAxis = brickGridSize(geometry.dims, brickSize);
     const [nbx, nby, nbz] = this.bricksPerAxis;
     this.bricks = Array.from({ length: nbx * nby * nbz }, () => null);
-    this.styles = defaultStyles();
+    this.labels = defaultLabelTable().slice();
   }
 
   get labelVersion(): number {
     return this.version;
   }
 
+  get labelTable(): Float32Array {
+    return this.labels;
+  }
+
   getLabelStyle(segment: number): LabelStyle {
-    return this.styles[segment]!;
+    return this.styles.get(segment) ?? defaultStyle(segment);
   }
 
   setLabelStyle(segment: number, style: LabelStyle): void {
-    this.styles[segment] = style;
+    this.styles.set(segment, style);
+    const offset = segment * 4;
+    if (style.visible) {
+      this.labels[offset] = style.color[0];
+      this.labels[offset + 1] = style.color[1];
+      this.labels[offset + 2] = style.color[2];
+      this.labels[offset + 3] = style.opacity;
+    } else {
+      this.labels.fill(0, offset, offset + 4);
+    }
     this.version++;
   }
 
@@ -85,7 +111,7 @@ export class Segmentation {
 
   paintSphere(centerWorld: Vec3, radiusMm: number, segment: number): void {
     if (!Number.isInteger(segment) || segment < 1 || segment >= SEGMENT_COUNT) {
-      throw new Error(`Segment index must be an integer in [1, 255], got ${segment}.`);
+      throw new Error(`Segment index must be an integer in [1, 65535], got ${segment}.`);
     }
     const [dx, dy, dz] = this.geometry.dims;
     const [sx, sy, sz] = this.geometry.spacing;
@@ -124,13 +150,13 @@ export class Segmentation {
       linearIndex,
     );
     const [w, h, d] = size;
-    const data = this.bricks[linearIndex] ?? new Uint8Array(w * h * d * OVERLAP_DEPTH);
+    const data = this.bricks[linearIndex] ?? new Uint16Array(w * h * d * OVERLAP_DEPTH);
     return { origin, size, data };
   }
 
-  private allocateBrick(index: number): Uint8Array {
+  private allocateBrick(index: number): Uint16Array {
     const { size } = brickBounds(this.geometry.dims, this.brickSize, this.bricksPerAxis, index);
-    const brick = new Uint8Array(size[0] * size[1] * size[2] * OVERLAP_DEPTH);
+    const brick = new Uint16Array(size[0] * size[1] * size[2] * OVERLAP_DEPTH);
     this.bricks[index] = brick;
     return brick;
   }

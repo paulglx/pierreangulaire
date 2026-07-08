@@ -106,7 +106,7 @@ export function raycastShader(filterableVolume: boolean): string {
 ${SHARED}
 @group(0) @binding(1) var volume: texture_3d<f32>;
 @group(0) @binding(2) var segmentation: texture_3d<u32>;
-@group(0) @binding(3) var<uniform> labels: array<vec4<f32>, 256>;
+@group(0) @binding(3) var<storage, read> labels: array<vec4<f32>>;
 @group(0) @binding(4) var brickRange: texture_3d<f32>;
 ${filterableVolume ? HARDWARE_TRILINEAR : MANUAL_TRILINEAR}
 fn slotsAt(q: vec3<f32>) -> vec4<u32> {
@@ -155,13 +155,15 @@ fn clipAxis(startC: f32, dirC: f32, hiC: f32, t: vec2<f32>) -> vec2<f32> {
 
 struct FragOut {
   @location(0) color: vec4<f32>,
-  @location(1) segments: vec2<u32>,
+  @location(1) segments: vec4<u32>,
 };
 
-fn packSegments(seen: array<u32, 8>) -> vec2<u32> {
-  return vec2<u32>(
-    seen[0] | (seen[1] << 8u) | (seen[2] << 16u) | (seen[3] << 24u),
-    seen[4] | (seen[5] << 8u) | (seen[6] << 16u) | (seen[7] << 24u),
+fn packSegments(seen: array<u32, 8>) -> vec4<u32> {
+  return vec4<u32>(
+    seen[0] | (seen[1] << 16u),
+    seen[2] | (seen[3] << 16u),
+    seen[4] | (seen[5] << 16u),
+    seen[6] | (seen[7] << 16u),
   );
 }
 
@@ -169,7 +171,7 @@ fn packSegments(seen: array<u32, 8>) -> vec2<u32> {
 fn fs(in: VertexOut) -> FragOut {
   var out: FragOut;
   out.color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-  out.segments = vec2<u32>(0u);
+  out.segments = vec4<u32>(0u);
 
   let plane = U.focalPoint + U.right * (in.uv.x * U.halfWidth) + U.trueUp * (in.uv.y * U.halfHeight);
   let count = max(u32(U.sampleCount), 1u);
@@ -327,7 +329,7 @@ export function segmentationResolveShader(): string {
   return /* wgsl */ `
 ${SHARED}
 @group(0) @binding(1) var projectedSegments: texture_2d<u32>;
-@group(0) @binding(2) var<uniform> labels: array<vec4<f32>, 256>;
+@group(0) @binding(2) var<storage, read> labels: array<vec4<f32>>;
 
 const BORDER_ALPHA = 0.9;
 const SEG_ISO = 0.5;
@@ -366,18 +368,18 @@ fn atLeastOneTexel(v: vec2<f32>) -> vec2<f32> {
   return v * (max(len, 1.0) / max(len, 1e-6));
 }
 
-fn segmentsAt(px: vec2<f32>) -> vec2<u32> {
+fn segmentsAt(px: vec2<f32>) -> vec4<u32> {
   let dims = vec2<i32>(textureDimensions(projectedSegments));
   let c = clamp(vec2<i32>(floor(px)), vec2<i32>(0), dims - vec2<i32>(1));
-  return textureLoad(projectedSegments, c, 0).xy;
+  return textureLoad(projectedSegments, c, 0);
 }
 
-fn segmentAt(ids: vec2<u32>, k: u32) -> u32 {
-  let word = select(ids.x, ids.y, k >= 4u);
-  return (word >> ((k % 4u) * 8u)) & 0xffu;
+fn segmentAt(ids: vec4<u32>, k: u32) -> u32 {
+  var words = ids;
+  return (words[k / 2u] >> ((k % 2u) * 16u)) & 0xffffu;
 }
 
-fn containsSegment(ids: vec2<u32>, segment: u32) -> bool {
+fn containsSegment(ids: vec4<u32>, segment: u32) -> bool {
   for (var k = 0u; k < 8u; k = k + 1u) {
     if (segmentAt(ids, k) == segment) {
       return true;
@@ -388,7 +390,7 @@ fn containsSegment(ids: vec2<u32>, segment: u32) -> bool {
 
 fn resolveAliased(px: vec2<f32>) -> vec4<f32> {
   let center = segmentsAt(px);
-  if (all(center == vec2<u32>(0u))) {
+  if (all(center == vec4<u32>(0u))) {
     return vec4<f32>(0.0);
   }
   let borderRight = atLeastOneTexel(indexOffsetToPixels(planeStep(U.right) * SEG_BORDER_WIDTH));
@@ -425,9 +427,9 @@ fn resolveAntialiased(px: vec2<f32>, q: vec3<f32>) -> vec4<f32> {
   let upStep = planeStep(U.trueUp);
   let gateRight = indexOffsetToPixels(rightStep * f32(SEG_KERNEL));
   let gateUp = indexOffsetToPixels(upStep * f32(SEG_KERNEL));
-  if (all(segmentsAt(px) == vec2<u32>(0u))
-    && all(segmentsAt(px - gateRight) == vec2<u32>(0u)) && all(segmentsAt(px + gateRight) == vec2<u32>(0u))
-    && all(segmentsAt(px - gateUp) == vec2<u32>(0u)) && all(segmentsAt(px + gateUp) == vec2<u32>(0u))) {
+  if (all(segmentsAt(px) == vec4<u32>(0u))
+    && all(segmentsAt(px - gateRight) == vec4<u32>(0u)) && all(segmentsAt(px + gateRight) == vec4<u32>(0u))
+    && all(segmentsAt(px - gateUp) == vec4<u32>(0u)) && all(segmentsAt(px + gateUp) == vec4<u32>(0u))) {
     return vec4<f32>(0.0);
   }
 
