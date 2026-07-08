@@ -18,9 +18,19 @@
       <button id="reset" class="hidden cursor-pointer text-stone-400 hover:underline" type="button">
         Reset orientation
       </button>
-      <button id="sphere" class="cursor-pointer text-stone-400 hover:underline" type="button">
-        Add 50 segments
-      </button>
+      <div class="flex items-center gap-2">
+        <span class="text-stone-400">Segments:</span>
+        <button id="sphere-50" class="cursor-pointer text-stone-400 hover:underline" type="button">
+          +50
+        </button>
+        <button
+          id="sphere-1000"
+          class="cursor-pointer text-stone-400 hover:underline"
+          type="button"
+        >
+          +1000
+        </button>
+      </div>
       <button id="antialiasing" class="cursor-pointer text-stone-50 hover:underline" type="button">
         Antialiasing: on
       </button>
