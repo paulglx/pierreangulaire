@@ -1,5 +1,5 @@
 import { brickBounds, brickGridSize } from './brick-store';
-import { type VolumeGeometry, voxelCount, worldToIndex } from './geometry';
+import { type VolumeGeometry, worldToIndex } from './geometry';
 import type { Vec3 } from './math';
 
 export const OVERLAP_DEPTH = 4;
@@ -47,7 +47,7 @@ export class Segmentation {
   readonly brickSize: number;
   readonly bricksPerAxis: readonly [number, number, number];
 
-  private readonly voxels: Uint8Array;
+  private readonly bricks: (Uint8Array | null)[];
   private readonly styles: LabelStyle[];
   private readonly voxelsPerSegment = new Uint32Array(SEGMENT_COUNT);
   private readonly dirty = new Set<number>();
@@ -57,7 +57,8 @@ export class Segmentation {
     this.geometry = geometry;
     this.brickSize = brickSize;
     this.bricksPerAxis = brickGridSize(geometry.dims, brickSize);
-    this.voxels = new Uint8Array(voxelCount(geometry) * OVERLAP_DEPTH);
+    const [nbx, nby, nbz] = this.bricksPerAxis;
+    this.bricks = Array.from({ length: nbx * nby * nbz }, () => null);
     this.styles = defaultStyles();
   }
 
@@ -103,9 +104,7 @@ export class Segmentation {
           const wy = (j - center[1]) * sy;
           const wz = (k - center[2]) * sz;
           if (wx * wx + wy * wy + wz * wz > radiusSq) continue;
-          if (this.addToSlots(i + j * dx + k * dx * dy, segment)) {
-            this.markVoxelDirty(i, j, k);
-          }
+          this.addToSlots(i, j, k, segment);
         }
       }
     }
@@ -124,30 +123,37 @@ export class Segmentation {
       this.bricksPerAxis,
       linearIndex,
     );
-    const [dx, dy] = this.geometry.dims;
-    const [ox, oy, oz] = origin;
     const [w, h, d] = size;
-    const data = new Uint8Array(w * h * d * OVERLAP_DEPTH);
-    for (let z = 0; z < d; z++) {
-      for (let y = 0; y < h; y++) {
-        const src = (ox + (oy + y) * dx + (oz + z) * dx * dy) * OVERLAP_DEPTH;
-        data.set(
-          this.voxels.subarray(src, src + w * OVERLAP_DEPTH),
-          (y * w + z * w * h) * OVERLAP_DEPTH,
-        );
-      }
-    }
+    const data = this.bricks[linearIndex] ?? new Uint8Array(w * h * d * OVERLAP_DEPTH);
     return { origin, size, data };
   }
 
-  private addToSlots(voxel: number, segment: number): boolean {
-    const offset = voxel * OVERLAP_DEPTH;
+  private allocateBrick(index: number): Uint8Array {
+    const { size } = brickBounds(this.geometry.dims, this.brickSize, this.bricksPerAxis, index);
+    const brick = new Uint8Array(size[0] * size[1] * size[2] * OVERLAP_DEPTH);
+    this.bricks[index] = brick;
+    return brick;
+  }
+
+  private addToSlots(i: number, j: number, k: number, segment: number): void {
+    const size = this.brickSize;
+    const [dx, dy] = this.geometry.dims;
+    const [nbx, nby] = this.bricksPerAxis;
+    const bx = Math.floor(i / size);
+    const by = Math.floor(j / size);
+    const bz = Math.floor(k / size);
+    const brickIndex = bx + by * nbx + bz * nbx * nby;
+    const w = Math.min(size, dx - bx * size);
+    const h = Math.min(size, dy - by * size);
+    const slots = this.bricks[brickIndex] ?? this.allocateBrick(brickIndex);
+    const offset = (i - bx * size + (j - by * size) * w + (k - bz * size) * w * h) * OVERLAP_DEPTH;
+
     let emptySlot = -1;
     let lowestSlot = 0;
     let lowest = SEGMENT_COUNT;
     for (let slot = 0; slot < OVERLAP_DEPTH; slot++) {
-      const existing = this.voxels[offset + slot]!;
-      if (existing === segment) return false;
+      const existing = slots[offset + slot]!;
+      if (existing === segment) return;
       if (existing === 0) {
         if (emptySlot === -1) emptySlot = slot;
       } else if (existing < lowest) {
@@ -156,22 +162,14 @@ export class Segmentation {
       }
     }
     if (emptySlot !== -1) {
-      this.voxels[offset + emptySlot] = segment;
+      slots[offset + emptySlot] = segment;
     } else if (lowest < segment) {
       this.voxelsPerSegment[lowest] = this.voxelsPerSegment[lowest]! - 1;
-      this.voxels[offset + lowestSlot] = segment;
+      slots[offset + lowestSlot] = segment;
     } else {
-      return false;
+      return;
     }
     this.voxelsPerSegment[segment] = this.voxelsPerSegment[segment]! + 1;
-    return true;
-  }
-
-  private markVoxelDirty(i: number, j: number, k: number): void {
-    const [nbx, nby] = this.bricksPerAxis;
-    const bx = Math.floor(i / this.brickSize);
-    const by = Math.floor(j / this.brickSize);
-    const bz = Math.floor(k / this.brickSize);
-    this.dirty.add(bx + by * nbx + bz * nbx * nby);
+    this.dirty.add(brickIndex);
   }
 }

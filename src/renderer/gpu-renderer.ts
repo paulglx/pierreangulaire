@@ -2,12 +2,13 @@ import { dot } from '../math';
 import type { Segmentation } from '../segmentation';
 import type { Viewport } from '../viewport';
 import type { Volume } from '../volume';
-import { raycastShader, segmentationResolveShader } from './raycast-shader';
+import { raycastShader, SEG_SLOTS_PER_AXIS, segmentationResolveShader } from './raycast-shader';
 import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 48;
 const LABEL_FLOATS = 256 * 4;
 const RANGE_FLOATS = 4;
+const SEG_SLOTS_PER_LAYER = SEG_SLOTS_PER_AXIS * SEG_SLOTS_PER_AXIS;
 
 interface VolumeResource {
   texture: GPUTexture;
@@ -16,8 +17,10 @@ interface VolumeResource {
   rangeView: GPUTextureView;
   rangeData: Float32Array;
   segOccupancy: Uint8Array;
-  segTexture: GPUTexture | null;
-  segView: GPUTextureView | null;
+  segAtlas: GPUTexture | null;
+  segAtlasView: GPUTextureView | null;
+  segSlots: Int32Array;
+  segSlotCount: number;
   labelBuffer: GPUBuffer;
   labelVersion: number;
 }
@@ -195,8 +198,10 @@ export class GPURenderer implements Renderer {
       rangeView: rangeTexture.createView(),
       rangeData: new Float32Array(brickCount * RANGE_FLOATS),
       segOccupancy: new Uint8Array(brickCount),
-      segTexture: null,
-      segView: null,
+      segAtlas: null,
+      segAtlasView: null,
+      segSlots: new Int32Array(brickCount).fill(-1),
+      segSlotCount: 0,
       labelBuffer: this.device.createBuffer({
         size: LABEL_FLOATS * 4,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -210,7 +215,7 @@ export class GPURenderer implements Renderer {
     if (!resource) return;
     resource.texture.destroy();
     resource.rangeTexture.destroy();
-    resource.segTexture?.destroy();
+    resource.segAtlas?.destroy();
     resource.labelBuffer.destroy();
     this.volumes.delete(id);
     for (const viewport of this.viewports.values()) {
@@ -250,26 +255,26 @@ export class GPURenderer implements Renderer {
   uploadSegmentationBricks(volume: Volume, brickIndices: number[]): void {
     const resource = this.volumes.get(volume.id);
     if (!resource) return;
-    if (!resource.segTexture) {
-      const [width, height, depth] = volume.geometry.dims;
-      resource.segTexture = this.device.createTexture({
-        size: { width, height, depthOrArrayLayers: depth },
-        dimension: '3d',
-        format: 'rgba8uint',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-      });
-      resource.segView = resource.segTexture.createView();
+    const brickSize = volume.segmentation.brickSize;
+    let slotsNeeded = resource.segSlotCount;
+    for (const index of brickIndices) {
+      if (resource.segSlots[index] === -1) slotsNeeded++;
     }
+    this.ensureSegAtlasCapacity(resource, brickSize, slotsNeeded);
     const grid = volume.segmentation.bricksPerAxis;
     const changed: number[] = [];
     for (const index of brickIndices) {
       const brick = volume.segmentation.readBrick(index);
       const [w, h, d] = brick.size;
+      let slot = resource.segSlots[index]!;
+      if (slot === -1) {
+        slot = resource.segSlotCount++;
+        resource.segSlots[index] = slot;
+        resource.rangeData[index * RANGE_FLOATS + 3] = slot + 1;
+        this.writeRangeTexel(resource, grid, index);
+      }
       this.device.queue.writeTexture(
-        {
-          texture: resource.segTexture,
-          origin: { x: brick.origin[0], y: brick.origin[1], z: brick.origin[2] },
-        },
+        { texture: resource.segAtlas!, origin: slotOrigin(slot, brickSize) },
         brick.data,
         { bytesPerRow: w * 4, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
@@ -318,6 +323,51 @@ export class GPURenderer implements Renderer {
     );
   }
 
+  private ensureSegAtlasCapacity(
+    resource: VolumeResource,
+    brickSize: number,
+    slotsNeeded: number,
+  ): void {
+    const currentLayers = resource.segAtlas ? resource.segAtlas.depthOrArrayLayers / brickSize : 0;
+    if (slotsNeeded <= currentLayers * SEG_SLOTS_PER_LAYER) return;
+    const maxLayers = Math.floor(this.device.limits.maxTextureDimension3D / brickSize);
+    const layers = Math.min(
+      maxLayers,
+      Math.max(Math.ceil(slotsNeeded / SEG_SLOTS_PER_LAYER), currentLayers * 2),
+    );
+    if (slotsNeeded > layers * SEG_SLOTS_PER_LAYER) {
+      throw new Error(
+        `Segmentation atlas cannot hold ${slotsNeeded} bricks (max ${layers * SEG_SLOTS_PER_LAYER}).`,
+      );
+    }
+    const atlas = this.device.createTexture({
+      size: {
+        width: SEG_SLOTS_PER_AXIS * brickSize,
+        height: SEG_SLOTS_PER_AXIS * brickSize,
+        depthOrArrayLayers: layers * brickSize,
+      },
+      dimension: '3d',
+      format: 'rgba8uint',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+    });
+    if (resource.segAtlas) {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyTextureToTexture(
+        { texture: resource.segAtlas },
+        { texture: atlas },
+        {
+          width: resource.segAtlas.width,
+          height: resource.segAtlas.height,
+          depthOrArrayLayers: resource.segAtlas.depthOrArrayLayers,
+        },
+      );
+      this.device.queue.submit([encoder.finish()]);
+      resource.segAtlas.destroy();
+    }
+    resource.segAtlas = atlas;
+    resource.segAtlasView = atlas.createView();
+  }
+
   registerViewport(viewport: Viewport): void {
     const context = viewport.canvas.getContext('webgpu');
     if (!context) {
@@ -359,7 +409,7 @@ export class GPURenderer implements Renderer {
       const volumeResource = this.volumes.get(viewport.volume.id);
       if (!resource || !volumeResource) continue;
 
-      const segView = volumeResource.segView ?? this.emptySegView;
+      const segView = volumeResource.segAtlasView ?? this.emptySegView;
       if (
         resource.bindGroup === null ||
         resource.bindGroupVolumeId !== viewport.volume.id ||
@@ -389,7 +439,7 @@ export class GPURenderer implements Renderer {
         volumeResource.labelVersion = segmentation.labelVersion;
       }
 
-      const segEnabled = viewport.segmentationVisible && volumeResource.segTexture !== null;
+      const segEnabled = viewport.segmentationVisible && volumeResource.segAtlas !== null;
       writeUniforms(
         resource.uniformData,
         viewport,
@@ -475,13 +525,21 @@ export class GPURenderer implements Renderer {
     for (const resource of this.volumes.values()) {
       resource.texture.destroy();
       resource.rangeTexture.destroy();
-      resource.segTexture?.destroy();
+      resource.segAtlas?.destroy();
       resource.labelBuffer.destroy();
     }
     this.volumes.clear();
     this.emptySegTexture.destroy();
     this.device.destroy();
   }
+}
+
+function slotOrigin(slot: number, brickSize: number): GPUOrigin3DDict {
+  return {
+    x: (slot % SEG_SLOTS_PER_AXIS) * brickSize,
+    y: (Math.floor(slot / SEG_SLOTS_PER_AXIS) % SEG_SLOTS_PER_AXIS) * brickSize,
+    z: Math.floor(slot / SEG_SLOTS_PER_LAYER) * brickSize,
+  };
 }
 
 function hasLabels(data: Uint8Array): number {

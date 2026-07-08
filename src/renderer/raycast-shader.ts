@@ -1,3 +1,5 @@
+export const SEG_SLOTS_PER_AXIS = 8;
+
 const HARDWARE_TRILINEAR = /* wgsl */ `
 @group(0) @binding(5) var volumeSampler: sampler;
 
@@ -110,7 +112,19 @@ ${filterableVolume ? HARDWARE_TRILINEAR : MANUAL_TRILINEAR}
 fn slotsAt(q: vec3<f32>) -> vec4<u32> {
   let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
   let c = clamp(vec3<i32>(round(q)), vec3<i32>(0), maxIndex);
-  return textureLoad(segmentation, c, 0);
+  let brickSize = i32(U.brickSize);
+  let bc = c / brickSize;
+  let slotEntry = i32(textureLoad(brickRange, bc, 0).w);
+  if (slotEntry == 0) {
+    return vec4<u32>(0u);
+  }
+  let slot = slotEntry - 1;
+  let slotCoord = vec3<i32>(
+    slot % ${SEG_SLOTS_PER_AXIS},
+    (slot / ${SEG_SLOTS_PER_AXIS}) % ${SEG_SLOTS_PER_AXIS},
+    slot / ${SEG_SLOTS_PER_AXIS * SEG_SLOTS_PER_AXIS},
+  );
+  return textureLoad(segmentation, slotCoord * brickSize + c - bc * brickSize, 0);
 }
 
 fn inBounds(q: vec3<f32>) -> bool {

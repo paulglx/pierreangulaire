@@ -108,6 +108,15 @@ test('label styles default to distinct visible colors and can be edited', () => 
   expect(segmentation.labelVersion).toBe(1);
 });
 
+test('bricks untouched by any paint read as empty and are never dirty', () => {
+  const segmentation = new Segmentation(geometry, 4);
+  segmentation.paintSphere([1, 1, 1], 1, 3);
+
+  const untouched = segmentation.readBrick(7);
+  expect(untouched.data.every((slot) => slot === 0)).toBe(true);
+  expect(segmentation.takeDirtyBricks()).toEqual([0]);
+});
+
 test('dirty bricks span every brick touched by the sphere', () => {
   const segmentation = new Segmentation(geometry, 4);
   segmentation.paintSphere([4, 4, 4], 1.8, 1);
