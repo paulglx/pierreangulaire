@@ -215,6 +215,29 @@ fn fs(in: VertexOut) -> FragOut {
       segOccupied = r.z;
       lastBrick = bc;
     }
+
+    var imageSkip = false;
+    if (mode == 0u) {
+      imageSkip = brickMax <= maxValue;
+    } else if (mode == 1u) {
+      imageSkip = brickMin >= minValue;
+    } else if (mode == 3u) {
+      imageSkip = applyWindow(brickMax) <= 0.0 || compositeAlpha > 0.995;
+    }
+    let segNeeded = U.segEnabled > 0.5 && segOccupied > 0.5 && seenCount < 8u;
+
+    if (count > 1u && imageSkip && !segNeeded && U.debugEmptyBlocks < 0.5) {
+      let brickLo = vec3<f32>(bc) * U.brickSize;
+      let moving = abs(qDir) > vec3<f32>(1e-6);
+      let exitFace = select(brickLo, brickLo + vec3<f32>(U.brickSize), qDir > vec3<f32>(0.0));
+      let safeDir = select(vec3<f32>(1.0), qDir, moving);
+      let tAxis = select(vec3<f32>(2.0), (exitFace - qStart) / safeDir, moving);
+      let tExit = min(min(tAxis.x, tAxis.y), tAxis.z);
+      let exitIndex = u32(max(ceil(tExit * f32(count - 1u)) - 1.0, 0.0));
+      i = max(exitIndex, i + 1u) - 1u;
+      continue;
+    }
+
     if (U.debugEmptyBlocks > 0.5 && applyWindow(brickMax) <= 0.0) {
       let local = q - vec3<f32>(bc) * U.brickSize;
       let toFace = min(local, vec3<f32>(U.brickSize) - local);
@@ -228,7 +251,7 @@ fn fs(in: VertexOut) -> FragOut {
       }
     }
 
-    if (U.segEnabled > 0.5 && segOccupied > 0.5 && seenCount < 8u) {
+    if (segNeeded) {
       let slots = slotsAt(q);
       for (var s = 0u; s < 4u; s = s + 1u) {
         let segment = slots[s];
@@ -248,11 +271,7 @@ fn fs(in: VertexOut) -> FragOut {
       }
     }
 
-    if (mode == 0u && brickMax <= maxValue) {
-      continue;
-    } else if (mode == 1u && brickMin >= minValue) {
-      continue;
-    } else if (mode == 3u && (applyWindow(brickMax) <= 0.0 || compositeAlpha > 0.995)) {
+    if (imageSkip) {
       continue;
     }
 
