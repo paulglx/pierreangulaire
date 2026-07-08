@@ -2,7 +2,7 @@ import { dot } from '../math';
 import type { Segmentation } from '../segmentation';
 import type { Viewport } from '../viewport';
 import type { Volume } from '../volume';
-import { raycastShader } from './raycast-shader';
+import { raycastShader, segmentationResolveShader } from './raycast-shader';
 import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 48;
@@ -29,6 +29,9 @@ interface ViewportResource {
   bindGroup: GPUBindGroup | null;
   bindGroupVolumeId: string | null;
   bindGroupSegView: GPUTextureView | null;
+  segTarget: { texture: GPUTexture; view: GPUTextureView } | null;
+  resolveBindGroup: GPUBindGroup | null;
+  resolveBindGroupVolumeId: string | null;
 }
 
 export class GPURenderer implements Renderer {
@@ -36,6 +39,8 @@ export class GPURenderer implements Renderer {
   private format!: GPUTextureFormat;
   private pipeline!: GPURenderPipeline;
   private bindGroupLayout!: GPUBindGroupLayout;
+  private resolvePipeline!: GPURenderPipeline;
+  private resolveBindGroupLayout!: GPUBindGroupLayout;
   private emptySegTexture!: GPUTexture;
   private emptySegView!: GPUTextureView;
   private volumeSampler: GPUSampler | null = null;
@@ -113,7 +118,52 @@ export class GPURenderer implements Renderer {
     this.pipeline = this.device.createRenderPipeline({
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
       vertex: { module, entryPoint: 'vs' },
-      fragment: { module, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: {
+        module,
+        entryPoint: 'fs',
+        targets: [{ format: this.format }, { format: 'rg32uint' }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+
+    const resolveModule = this.device.createShaderModule({ code: segmentationResolveShader() });
+    this.resolveBindGroupLayout = this.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform' },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'uint' },
+        },
+        {
+          binding: 2,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform' },
+        },
+      ],
+    });
+    this.resolvePipeline = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({
+        bindGroupLayouts: [this.resolveBindGroupLayout],
+      }),
+      vertex: { module: resolveModule, entryPoint: 'vs' },
+      fragment: {
+        module: resolveModule,
+        entryPoint: 'fs',
+        targets: [
+          {
+            format: this.format,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+            },
+          },
+        ],
+      },
       primitive: { topology: 'triangle-list' },
     });
   }
@@ -168,6 +218,10 @@ export class GPURenderer implements Renderer {
         viewport.bindGroup = null;
         viewport.bindGroupVolumeId = null;
         viewport.bindGroupSegView = null;
+      }
+      if (viewport.resolveBindGroupVolumeId === id) {
+        viewport.resolveBindGroup = null;
+        viewport.resolveBindGroupVolumeId = null;
       }
     }
   }
@@ -280,6 +334,9 @@ export class GPURenderer implements Renderer {
       bindGroup: null,
       bindGroupVolumeId: null,
       bindGroupSegView: null,
+      segTarget: null,
+      resolveBindGroup: null,
+      resolveBindGroupVolumeId: null,
     });
   }
 
@@ -290,6 +347,7 @@ export class GPURenderer implements Renderer {
     if (!resource) return;
     resource.context.unconfigure();
     resource.uniformBuffer.destroy();
+    resource.segTarget?.texture.destroy();
     this.viewports.delete(id);
   }
 
@@ -341,13 +399,39 @@ export class GPURenderer implements Renderer {
       );
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
 
+      const canvasTexture = resource.context.getCurrentTexture();
+      let segTarget = resource.segTarget;
+      if (
+        segTarget === null ||
+        segTarget.texture.width !== canvasTexture.width ||
+        segTarget.texture.height !== canvasTexture.height
+      ) {
+        segTarget?.texture.destroy();
+        const texture = this.device.createTexture({
+          size: { width: canvasTexture.width, height: canvasTexture.height },
+          format: 'rg32uint',
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        segTarget = { texture, view: texture.createView() };
+        resource.segTarget = segTarget;
+        resource.resolveBindGroup = null;
+        resource.resolveBindGroupVolumeId = null;
+      }
+
+      const canvasView = canvasTexture.createView();
       const pass = encoder.beginRenderPass({
         colorAttachments: [
           {
-            view: resource.context.getCurrentTexture().createView(),
+            view: canvasView,
             clearValue: { r: 0, g: 0, b: 0, a: 1 },
             loadOp: 'clear',
             storeOp: 'store',
+          },
+          {
+            view: segTarget.view,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: segEnabled ? 'store' : 'discard',
           },
         ],
       });
@@ -355,6 +439,30 @@ export class GPURenderer implements Renderer {
       pass.setBindGroup(0, resource.bindGroup);
       pass.draw(3);
       pass.end();
+
+      if (segEnabled) {
+        if (
+          resource.resolveBindGroup === null ||
+          resource.resolveBindGroupVolumeId !== viewport.volume.id
+        ) {
+          resource.resolveBindGroup = this.device.createBindGroup({
+            layout: this.resolveBindGroupLayout,
+            entries: [
+              { binding: 0, resource: { buffer: resource.uniformBuffer } },
+              { binding: 1, resource: segTarget.view },
+              { binding: 2, resource: { buffer: volumeResource.labelBuffer } },
+            ],
+          });
+          resource.resolveBindGroupVolumeId = viewport.volume.id;
+        }
+        const resolvePass = encoder.beginRenderPass({
+          colorAttachments: [{ view: canvasView, loadOp: 'load', storeOp: 'store' }],
+        });
+        resolvePass.setPipeline(this.resolvePipeline);
+        resolvePass.setBindGroup(0, resource.resolveBindGroup);
+        resolvePass.draw(3);
+        resolvePass.end();
+      }
       submitted = true;
     }
     if (submitted) {

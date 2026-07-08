@@ -34,8 +34,7 @@ fn sampleTrilinear(q: vec3<f32>) -> f32 {
 }
 `;
 
-export function raycastShader(filterableVolume: boolean): string {
-  return /* wgsl */ `
+const SHARED = /* wgsl */ `
 struct Uniforms {
   right: vec3<f32>,
   halfWidth: f32,
@@ -63,10 +62,6 @@ struct Uniforms {
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
-@group(0) @binding(1) var volume: texture_3d<f32>;
-@group(0) @binding(2) var segmentation: texture_3d<u32>;
-@group(0) @binding(3) var<uniform> labels: array<vec4<f32>, 256>;
-@group(0) @binding(4) var brickRange: texture_3d<f32>;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -94,13 +89,6 @@ fn worldToIndex(p: vec3<f32>) -> vec3<f32> {
     dot(rel, U.dirCol2) / U.spacing.z,
   );
 }
-${filterableVolume ? HARDWARE_TRILINEAR : MANUAL_TRILINEAR}
-const BORDER_ALPHA = 0.9;
-const SEG_ISO = 0.5;
-const SEG_ISO_INNER = 0.82;
-const SEG_BORDER_WIDTH = 3.0;
-const SEG_KERNEL: i32 = 3;
-const SEG_SUPPORT = 3.5;
 
 fn worldDirToIndex(v: vec3<f32>) -> vec3<f32> {
   return vec3<f32>(
@@ -109,137 +97,20 @@ fn worldDirToIndex(v: vec3<f32>) -> vec3<f32> {
     dot(v, U.dirCol2) / U.spacing.z,
   );
 }
+`;
 
-fn planeStep(v: vec3<f32>) -> vec3<f32> {
-  let d = worldDirToIndex(v);
-  let m = max(max(abs(d.x), abs(d.y)), abs(d.z));
-  return d / max(m, 1e-6);
-}
-
+export function raycastShader(filterableVolume: boolean): string {
+  return /* wgsl */ `
+${SHARED}
+@group(0) @binding(1) var volume: texture_3d<f32>;
+@group(0) @binding(2) var segmentation: texture_3d<u32>;
+@group(0) @binding(3) var<uniform> labels: array<vec4<f32>, 256>;
+@group(0) @binding(4) var brickRange: texture_3d<f32>;
+${filterableVolume ? HARDWARE_TRILINEAR : MANUAL_TRILINEAR}
 fn slotsAt(q: vec3<f32>) -> vec4<u32> {
   let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
   let c = clamp(vec3<i32>(round(q)), vec3<i32>(0), maxIndex);
   return textureLoad(segmentation, c, 0);
-}
-
-fn loadSlotsAt(c: vec3<i32>) -> vec4<u32> {
-  let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
-  return textureLoad(segmentation, clamp(c, vec3<i32>(0), maxIndex), 0);
-}
-
-fn containsSegment(slots: vec4<u32>, segment: u32) -> bool {
-  return any(slots == vec4<u32>(segment));
-}
-
-fn sampleSegmentation(q: vec3<f32>, rightStep: vec3<f32>, upStep: vec3<f32>) -> vec4<f32> {
-  var slots = slotsAt(q);
-  if (all(slots == vec4<u32>(0u))) {
-    return vec4<f32>(0.0);
-  }
-  let borderRight = rightStep * SEG_BORDER_WIDTH;
-  let borderUp = upStep * SEG_BORDER_WIDTH;
-  let nl = slotsAt(q - borderRight);
-  let nr = slotsAt(q + borderRight);
-  let nd = slotsAt(q - borderUp);
-  let nu = slotsAt(q + borderUp);
-  var color = vec3<f32>(0.0);
-  var alpha = 0.0;
-  for (var s = 0u; s < 4u; s = s + 1u) {
-    let segment = slots[s];
-    if (segment == 0u) {
-      continue;
-    }
-    let style = labels[segment];
-    if (style.a == 0.0) {
-      continue;
-    }
-    let interior = containsSegment(nl, segment) && containsSegment(nr, segment)
-      && containsSegment(nd, segment) && containsSegment(nu, segment);
-    var a = style.a;
-    if (!interior) {
-      a = max(a, BORDER_ALPHA);
-    }
-    color = color + style.rgb * a;
-    alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
-  }
-  return vec4<f32>(min(color, vec3<f32>(1.0)), alpha);
-}
-
-fn sampleSegmentationAntialiased(q: vec3<f32>, rightStep: vec3<f32>, upStep: vec3<f32>) -> vec4<f32> {
-  let gateRight = rightStep * f32(SEG_KERNEL);
-  let gateUp = upStep * f32(SEG_KERNEL);
-  if (all(slotsAt(q) == vec4<u32>(0u))
-    && all(slotsAt(q - gateRight) == vec4<u32>(0u)) && all(slotsAt(q + gateRight) == vec4<u32>(0u))
-    && all(slotsAt(q - gateUp) == vec4<u32>(0u)) && all(slotsAt(q + gateUp) == vec4<u32>(0u))) {
-    return vec4<f32>(0.0);
-  }
-
-  var seen: array<u32, 16>;
-  var cov: array<f32, 16>;
-  var seenCount = 0u;
-  var weightSum = 0.0;
-  let center = vec3<i32>(round(q));
-  for (var dz = -SEG_KERNEL; dz <= SEG_KERNEL; dz = dz + 1) {
-    for (var dy = -SEG_KERNEL; dy <= SEG_KERNEL; dy = dy + 1) {
-      for (var dx = -SEG_KERNEL; dx <= SEG_KERNEL; dx = dx + 1) {
-        let v = center + vec3<i32>(dx, dy, dz);
-        let r = q - vec3<f32>(v);
-        let t = dot(r, r) / (SEG_SUPPORT * SEG_SUPPORT);
-        if (t >= 1.0) {
-          continue;
-        }
-        let edge = 1.0 - t;
-        let weight = edge * edge;
-        weightSum = weightSum + weight;
-        let slots = loadSlotsAt(v);
-        for (var s = 0u; s < 4u; s = s + 1u) {
-          let segment = slots[s];
-          if (segment == 0u) {
-            continue;
-          }
-          var idx = seenCount;
-          for (var p = 0u; p < seenCount; p = p + 1u) {
-            if (seen[p] == segment) {
-              idx = p;
-            }
-          }
-          if (idx == seenCount) {
-            if (seenCount >= 16u) {
-              continue;
-            }
-            seen[seenCount] = segment;
-            cov[seenCount] = 0.0;
-            seenCount = seenCount + 1u;
-          }
-          cov[idx] = cov[idx] + weight;
-        }
-      }
-    }
-  }
-  if (weightSum <= 0.0) {
-    return vec4<f32>(0.0);
-  }
-
-  let halfBand = clamp(0.6 * U.pixelVoxels / SEG_SUPPORT, 0.01, 0.15);
-  var color = vec3<f32>(0.0);
-  var alpha = 0.0;
-  for (var i = 0u; i < seenCount; i = i + 1u) {
-    let segment = seen[i];
-    let style = labels[segment];
-    if (style.a == 0.0) {
-      continue;
-    }
-    let c = cov[i] / weightSum;
-    let outer = smoothstep(SEG_ISO - halfBand, SEG_ISO + halfBand, c);
-    if (outer <= 0.0) {
-      continue;
-    }
-    let inner = smoothstep(SEG_ISO_INNER - halfBand, SEG_ISO_INNER + halfBand, c);
-    let a = inner * style.a + max(outer - inner, 0.0) * BORDER_ALPHA;
-    color = color + style.rgb * a;
-    alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
-  }
-  return vec4<f32>(min(color, vec3<f32>(1.0)), alpha);
 }
 
 fn inBounds(q: vec3<f32>) -> bool {
@@ -268,14 +139,28 @@ fn clipAxis(startC: f32, dirC: f32, hiC: f32, t: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(max(t.x, min(a, b)), min(t.y, max(a, b)));
 }
 
+struct FragOut {
+  @location(0) color: vec4<f32>,
+  @location(1) segments: vec2<u32>,
+};
+
+fn packSegments(seen: array<u32, 8>) -> vec2<u32> {
+  return vec2<u32>(
+    seen[0] | (seen[1] << 8u) | (seen[2] << 16u) | (seen[3] << 24u),
+    seen[4] | (seen[5] << 8u) | (seen[6] << 16u) | (seen[7] << 24u),
+  );
+}
+
 @fragment
-fn fs(in: VertexOut) -> @location(0) vec4<f32> {
+fn fs(in: VertexOut) -> FragOut {
+  var out: FragOut;
+  out.color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  out.segments = vec2<u32>(0u);
+
   let plane = U.focalPoint + U.right * (in.uv.x * U.halfWidth) + U.trueUp * (in.uv.y * U.halfHeight);
   let count = max(u32(U.sampleCount), 1u);
   let qStart = worldToIndex(plane - U.normal * (U.slabThickness * 0.5));
   let qDir = worldDirToIndex(U.normal) * U.slabThickness;
-  let rightStep = planeStep(U.right);
-  let upStep = planeStep(U.trueUp);
 
   var iLo = 0u;
   var iHi = count - 1u;
@@ -285,7 +170,7 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
     t = clipAxis(qStart.y, qDir.y, U.dims.y - 1.0, t);
     t = clipAxis(qStart.z, qDir.z, U.dims.z - 1.0, t);
     if (t.x > t.y) {
-      return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+      return out;
     }
     let scale = f32(count - 1u);
     iLo = u32(max(ceil(t.x * scale) - 1.0, 0.0));
@@ -299,8 +184,8 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   var inBoundsCount = 0.0;
   var compositeColor = 0.0;
   var compositeAlpha = 0.0;
-  var segColor = vec3<f32>(0.0);
-  var segAlpha = 0.0;
+  var seen: array<u32, 8>;
+  var seenCount = 0u;
   var lastBrick = vec3<i32>(-2);
   var brickMin = 0.0;
   var brickMax = 0.0;
@@ -309,7 +194,7 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
 
   for (var i = iLo; i <= iHi; i = i + 1u) {
     if (mode == 3u && U.debugEmptyBlocks < 0.5 && compositeAlpha > 0.995
-      && (U.segEnabled < 0.5 || segAlpha > 0.995)) {
+      && (U.segEnabled < 0.5 || seenCount >= 8u)) {
       break;
     }
     var frac = 0.5;
@@ -343,15 +228,24 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
       }
     }
 
-    if (U.segEnabled > 0.5 && segOccupied > 0.5 && segAlpha < 0.995) {
-      var seg = vec4<f32>(0.0);
-      if (U.segAntialias > 0.5) {
-        seg = sampleSegmentationAntialiased(q, rightStep, upStep);
-      } else {
-        seg = sampleSegmentation(q, rightStep, upStep);
+    if (U.segEnabled > 0.5 && segOccupied > 0.5 && seenCount < 8u) {
+      let slots = slotsAt(q);
+      for (var s = 0u; s < 4u; s = s + 1u) {
+        let segment = slots[s];
+        if (segment == 0u || labels[segment].a == 0.0) {
+          continue;
+        }
+        var known = false;
+        for (var p = 0u; p < seenCount; p = p + 1u) {
+          if (seen[p] == segment) {
+            known = true;
+          }
+        }
+        if (!known && seenCount < 8u) {
+          seen[seenCount] = segment;
+          seenCount = seenCount + 1u;
+        }
       }
-      segColor = segColor + (1.0 - segAlpha) * seg.rgb;
-      segAlpha = segAlpha + (1.0 - segAlpha) * seg.a;
     }
 
     if (mode == 0u && brickMax <= maxValue) {
@@ -372,7 +266,7 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   }
 
   if (inBoundsCount == 0.0) {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    return out;
   }
 
   var gray = 0.0;
@@ -385,11 +279,199 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
   } else {
     gray = compositeColor;
   }
-  var rgb = vec3<f32>(gray) * (1.0 - segAlpha) + segColor;
+  var rgb = vec3<f32>(gray);
   if (debugAlpha > 0.0) {
     rgb = mix(rgb, vec3<f32>(1.0, 0.08, 0.55), debugAlpha);
   }
-  return vec4<f32>(rgb, 1.0);
+  out.color = vec4<f32>(rgb, 1.0);
+  out.segments = packSegments(seen);
+  return out;
+}
+`;
+}
+
+export function segmentationResolveShader(): string {
+  return /* wgsl */ `
+${SHARED}
+@group(0) @binding(1) var projectedSegments: texture_2d<u32>;
+@group(0) @binding(2) var<uniform> labels: array<vec4<f32>, 256>;
+
+const BORDER_ALPHA = 0.9;
+const SEG_ISO = 0.5;
+const SEG_ISO_INNER = 0.82;
+const SEG_BORDER_WIDTH = 3.0;
+const SEG_KERNEL: i32 = 3;
+const SEG_SUPPORT = 3.5;
+
+fn indexDirToWorld(v: vec3<f32>) -> vec3<f32> {
+  return U.dirCol0 * (v.x * U.spacing.x)
+    + U.dirCol1 * (v.y * U.spacing.y)
+    + U.dirCol2 * (v.z * U.spacing.z);
+}
+
+fn planeStep(v: vec3<f32>) -> vec3<f32> {
+  let d = worldDirToIndex(v);
+  let m = max(max(abs(d.x), abs(d.y)), abs(d.z));
+  return d / max(m, 1e-6);
+}
+
+fn planeProject(v: vec3<f32>) -> vec3<f32> {
+  return v - worldDirToIndex(U.normal) * dot(indexDirToWorld(v), U.normal);
+}
+
+fn indexOffsetToPixels(v: vec3<f32>) -> vec2<f32> {
+  let w = indexDirToWorld(v);
+  let dims = vec2<f32>(textureDimensions(projectedSegments));
+  return vec2<f32>(
+    dot(w, U.right) / U.halfWidth * dims.x * 0.5,
+    -(dot(w, U.trueUp) / U.halfHeight) * dims.y * 0.5,
+  );
+}
+
+fn atLeastOneTexel(v: vec2<f32>) -> vec2<f32> {
+  let len = length(v);
+  return v * (max(len, 1.0) / max(len, 1e-6));
+}
+
+fn segmentsAt(px: vec2<f32>) -> vec2<u32> {
+  let dims = vec2<i32>(textureDimensions(projectedSegments));
+  let c = clamp(vec2<i32>(floor(px)), vec2<i32>(0), dims - vec2<i32>(1));
+  return textureLoad(projectedSegments, c, 0).xy;
+}
+
+fn segmentAt(ids: vec2<u32>, k: u32) -> u32 {
+  let word = select(ids.x, ids.y, k >= 4u);
+  return (word >> ((k % 4u) * 8u)) & 0xffu;
+}
+
+fn containsSegment(ids: vec2<u32>, segment: u32) -> bool {
+  for (var k = 0u; k < 8u; k = k + 1u) {
+    if (segmentAt(ids, k) == segment) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn resolveAliased(px: vec2<f32>) -> vec4<f32> {
+  let center = segmentsAt(px);
+  if (all(center == vec2<u32>(0u))) {
+    return vec4<f32>(0.0);
+  }
+  let borderRight = atLeastOneTexel(indexOffsetToPixels(planeStep(U.right) * SEG_BORDER_WIDTH));
+  let borderUp = atLeastOneTexel(indexOffsetToPixels(planeStep(U.trueUp) * SEG_BORDER_WIDTH));
+  let nl = segmentsAt(px - borderRight);
+  let nr = segmentsAt(px + borderRight);
+  let nd = segmentsAt(px - borderUp);
+  let nu = segmentsAt(px + borderUp);
+  var color = vec3<f32>(0.0);
+  var alpha = 0.0;
+  for (var k = 0u; k < 8u; k = k + 1u) {
+    let segment = segmentAt(center, k);
+    if (segment == 0u) {
+      continue;
+    }
+    let style = labels[segment];
+    if (style.a == 0.0) {
+      continue;
+    }
+    let interior = containsSegment(nl, segment) && containsSegment(nr, segment)
+      && containsSegment(nd, segment) && containsSegment(nu, segment);
+    var a = style.a;
+    if (!interior) {
+      a = max(a, BORDER_ALPHA);
+    }
+    color = color + style.rgb * a;
+    alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
+  }
+  return vec4<f32>(min(color, vec3<f32>(1.0)), alpha);
+}
+
+fn resolveAntialiased(px: vec2<f32>, q: vec3<f32>) -> vec4<f32> {
+  let rightStep = planeStep(U.right);
+  let upStep = planeStep(U.trueUp);
+  let gateRight = indexOffsetToPixels(rightStep * f32(SEG_KERNEL));
+  let gateUp = indexOffsetToPixels(upStep * f32(SEG_KERNEL));
+  if (all(segmentsAt(px) == vec2<u32>(0u))
+    && all(segmentsAt(px - gateRight) == vec2<u32>(0u)) && all(segmentsAt(px + gateRight) == vec2<u32>(0u))
+    && all(segmentsAt(px - gateUp) == vec2<u32>(0u)) && all(segmentsAt(px + gateUp) == vec2<u32>(0u))) {
+    return vec4<f32>(0.0);
+  }
+
+  var seen: array<u32, 16>;
+  var cov: array<f32, 16>;
+  var seenCount = 0u;
+  var weightSum = 0.0;
+  let anchor = planeProject(round(q) - q);
+  for (var dy = -SEG_KERNEL; dy <= SEG_KERNEL; dy = dy + 1) {
+    for (var dx = -SEG_KERNEL; dx <= SEG_KERNEL; dx = dx + 1) {
+      let offset = anchor + rightStep * f32(dx) + upStep * f32(dy);
+      let t = dot(offset, offset) / (SEG_SUPPORT * SEG_SUPPORT);
+      if (t >= 1.0) {
+        continue;
+      }
+      let edge = 1.0 - t;
+      let weight = edge * edge;
+      weightSum = weightSum + weight;
+      let ids = segmentsAt(px + indexOffsetToPixels(offset));
+      for (var k = 0u; k < 8u; k = k + 1u) {
+        let segment = segmentAt(ids, k);
+        if (segment == 0u) {
+          continue;
+        }
+        var idx = seenCount;
+        for (var p = 0u; p < seenCount; p = p + 1u) {
+          if (seen[p] == segment) {
+            idx = p;
+          }
+        }
+        if (idx == seenCount) {
+          if (seenCount >= 16u) {
+            continue;
+          }
+          seen[seenCount] = segment;
+          cov[seenCount] = 0.0;
+          seenCount = seenCount + 1u;
+        }
+        cov[idx] = cov[idx] + weight;
+      }
+    }
+  }
+  if (weightSum <= 0.0) {
+    return vec4<f32>(0.0);
+  }
+
+  let halfBand = clamp(0.6 * U.pixelVoxels / SEG_SUPPORT, 0.01, 0.15);
+  var color = vec3<f32>(0.0);
+  var alpha = 0.0;
+  for (var i = 0u; i < seenCount; i = i + 1u) {
+    let segment = seen[i];
+    let style = labels[segment];
+    if (style.a == 0.0) {
+      continue;
+    }
+    let c = cov[i] / weightSum;
+    let outer = smoothstep(SEG_ISO - halfBand, SEG_ISO + halfBand, c);
+    if (outer <= 0.0) {
+      continue;
+    }
+    let inner = smoothstep(SEG_ISO_INNER - halfBand, SEG_ISO_INNER + halfBand, c);
+    let a = inner * style.a + max(outer - inner, 0.0) * BORDER_ALPHA;
+    color = color + style.rgb * a;
+    alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
+  }
+  return vec4<f32>(min(color, vec3<f32>(1.0)), alpha);
+}
+
+@fragment
+fn fs(in: VertexOut) -> @location(0) vec4<f32> {
+  let px = in.position.xy;
+  if (U.segAntialias > 0.5) {
+    let plane = U.focalPoint + U.right * (in.uv.x * U.halfWidth) + U.trueUp * (in.uv.y * U.halfHeight);
+    let q = worldToIndex(plane);
+    return resolveAntialiased(px, q);
+  }
+  return resolveAliased(px);
 }
 `;
 }
