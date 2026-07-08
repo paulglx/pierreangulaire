@@ -318,7 +318,7 @@ ${SHARED}
 const BORDER_ALPHA = 0.9;
 const SEG_ISO = 0.5;
 const SEG_ISO_INNER = 0.82;
-const SEG_BORDER_WIDTH = 3.0;
+const SEG_BORDER_WIDTH = 1.25;
 const SEG_KERNEL: i32 = 3;
 const SEG_SUPPORT = 3.5;
 
