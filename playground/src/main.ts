@@ -1,5 +1,5 @@
 import {
-  type BlendMode,
+  BlendMode,
   indexToWorld,
   initRenderingEngine,
   type Orientation,
@@ -15,6 +15,7 @@ import './style.css';
 const statusEl = document.querySelector<HTMLDivElement>('#status')!;
 const folderInput = document.querySelector<HTMLInputElement>('#folder')!;
 const kebabButton = document.querySelector<HTMLButtonElement>('#kebab')!;
+const globalControlsEl = document.querySelector<HTMLDivElement>('#global-controls')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
 const sphereButton = document.querySelector<HTMLButtonElement>('#sphere')!;
 const antialiasButton = document.querySelector<HTMLButtonElement>('#antialiasing')!;
@@ -41,6 +42,7 @@ let activeViewports: ActiveViewport[] = [];
 let activeVolume: Volume | null = null;
 let antialiasEnabled = true;
 let debugBlocksEnabled = false;
+let blendMode: BlendMode = BlendMode.MIP;
 
 let kebabEnabled = false;
 let kebabRaf = 0;
@@ -162,7 +164,7 @@ interface SliderSpec {
   apply: (value: number) => void;
 }
 
-function addSlider(controls: HTMLElement, viewport: Viewport, spec: SliderSpec): void {
+function addSlider(controls: HTMLElement, spec: SliderSpec, markDirty: () => void): void {
   const label = document.createElement('label');
   label.className = 'flex items-center gap-2';
 
@@ -186,7 +188,7 @@ function addSlider(controls: HTMLElement, viewport: Viewport, spec: SliderSpec):
     const next = Number(input.value);
     spec.apply(next);
     value.textContent = spec.format(next);
-    viewport.markDirty();
+    markDirty();
   });
 
   label.append(name, input, value);
@@ -212,7 +214,6 @@ function buildControls(viewport: Viewport, volume: Volume, range: ControlRange):
   const step = spacingAlongNormal(volume, normal) || 1;
   const half = halfExtentAlong(volume, normal);
   const fitZoom = viewport.camera.zoom;
-  const minSpacing = Math.min(...volume.geometry.spacing);
   const sliceBase = (dotVec(center, normal) - dotVec(volume.geometry.origin, normal)) / step;
 
   const specs: SliderSpec[] = [
@@ -260,28 +261,51 @@ function buildControls(viewport: Viewport, volume: Volume, range: ControlRange):
       format: (v) => String(Math.round(v)),
       apply: (v) => viewport.setWindowLevel({ center: viewport.windowLevel.center, width: v }),
     },
+  ];
+
+  for (const spec of specs) addSlider(controls, spec, () => viewport.markDirty());
+  panel.append(controls);
+}
+
+function markAllDirty(): void {
+  for (const { viewport } of activeViewports) viewport.markDirty();
+}
+
+function buildGlobalControls(volume: Volume): void {
+  globalControlsEl.replaceChildren();
+
+  const minSpacing = Math.min(...volume.geometry.spacing);
+  const maxHalf = Math.max(
+    ...activeViewports.map(({ baseNormal }) => halfExtentAlong(volume, baseNormal)),
+  );
+
+  const specs: SliderSpec[] = [
     {
       name: 'Slab',
       min: minSpacing,
-      max: Math.max(minSpacing * 2, half * 2),
+      max: Math.max(minSpacing * 2, maxHalf * 2),
       step: 'any',
-      value: viewport.slabThickness,
+      value: minSpacing,
       format: (v) => `${Math.round(v)}mm`,
-      apply: (v) => viewport.setSlabThickness(v),
+      apply: (v) => {
+        for (const { viewport } of activeViewports) viewport.setSlabThickness(v);
+      },
     },
     {
       name: 'Blend',
       min: 0,
       max: 3,
       step: 1,
-      value: viewport.blendMode,
+      value: blendMode,
       format: (v) => BLEND_NAMES[v] ?? '',
-      apply: (v) => viewport.setBlendMode(v as BlendMode),
+      apply: (v) => {
+        blendMode = v as BlendMode;
+        for (const { viewport } of activeViewports) viewport.setBlendMode(blendMode);
+      },
     },
   ];
 
-  for (const spec of specs) addSlider(controls, viewport, spec);
-  panel.append(controls);
+  for (const spec of specs) addSlider(globalControlsEl, spec, markAllDirty);
 }
 
 async function streamSlices(
@@ -355,6 +379,7 @@ async function open(files: File[]): Promise<void> {
       orientation: panel.orientation,
     });
     viewport.setWindowLevel({ center: series.windowCenter, width: series.windowWidth });
+    viewport.setBlendMode(blendMode);
     viewport.setSegmentationAntialiasing(antialiasEnabled);
     viewport.setDebugEmptyBlocks(debugBlocksEnabled);
     activeViewports.push({
@@ -371,6 +396,7 @@ async function open(files: File[]): Promise<void> {
     observer.observe(canvas);
   }
   syncResetButton();
+  buildGlobalControls(volume);
 
   const applyAutoWindow = (min: number, max: number): void => {
     if (series.hasTaggedWindow) return;

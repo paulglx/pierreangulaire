@@ -6,7 +6,7 @@
     <title>pierreangulaire · playground</title>
   </head>
   <body class="flex h-full flex-col bg-stone-950 font-mono text-xs leading-snug text-stone-50">
-    <header class="flex items-center gap-4 px-4 py-3">
+    <header class="flex flex-wrap items-center gap-4 px-4 py-3">
       <h1 class="m-0 font-normal text-stone-400">pierreangulaire · playground</h1>
       <label class="cursor-pointer hover:underline">
         Open DICOM folder
@@ -27,6 +27,7 @@
       <button id="debug-blocks" class="cursor-pointer text-stone-400 hover:underline" type="button">
         Empty blocks: off
       </button>
+      <div id="global-controls" class="flex items-center gap-4"></div>
       <div id="status" class="ml-auto text-stone-400 tabular-nums">
         Select a folder of DICOM files representing one volume.
       </div>
