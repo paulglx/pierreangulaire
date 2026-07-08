@@ -49,9 +49,9 @@ The library is a single TypeScript stack in three layers, top to bottom:
 
 1. **Application / public API** — the `RenderingEngine`, the viewports, the tools, the SVG overlay, the loaders and decode workers, and the `requestAnimationFrame` render loop. This is the surface consumers touch and the only layer that handles the DOM and input.
 2. **Renderer-agnostic state** — the single source of truth, held in plain TypeScript objects: the scene, the CPU-resident brick store (image and segmentation voxels as brick pool + page table), the camera, the 256-entry label table, and per-viewport window/level, blend mode, and slab thickness.
-3. **Renderer** — a swappable interface with exactly one active implementation, which turns the state above into pixels on each viewport canvas. Either the `GPURenderer` (WebGPU; the implemented backend, mirroring bricks into GPU textures and drawing via WGSL slab-raycast pipelines) or the `CPURenderer` (a worker-pool software raycaster that reads the brick store directly and blits pixels to the canvas; planned, not yet implemented).
+3. **Renderer** — a swappable interface with exactly one active implementation, which turns the state above into pixels on each viewport canvas. Either the `GPURenderer` (WebGPU; the implemented backend, mirroring bricks into GPU textures and drawing via WGSL slab-raycast pipelines) or the `CPURenderer` (a worker-pool software raycaster that reads the brick store directly and blits pixels to the canvas; planned).
 
-The application layer drives the render loop and pushes state changes down; each frame it asks the active renderer to redraw the dirty viewports by id. Everything flows down through the renderer interface, so nothing above that interface depends on WebGPU.
+The application layer drives the render loop and pushes state changes down; each frame it asks the active renderer to redraw the dirty viewports by id. Everything flows down through the renderer interface.
 
 ### 3.1 Layer responsibilities
 
@@ -66,7 +66,7 @@ Everything is TypeScript. Responsibilities split between the renderer-agnostic c
 **Renderer** (behind a swappable interface, §14) turns that state into pixels on each viewport canvas. Two implementations:
 
 - **`GPURenderer` (WebGPU)** — the only implemented backend. Owns a single `GPUDevice`/`GPUQueue`, one canvas context per viewport canvas (rendering targets each canvas directly), the WGSL slab-raycast pipelines and all draw submission, and the GPU-side mirror of brick/segmentation data (textures) plus camera matrices derived from the core's camera state.
-- **`CPURenderer` (software)** — planned, not yet implemented. A software slab raycaster in a Web Worker pool; reads bricks from the core's store directly, writes RGBA, and blits to each canvas. Implements the same interface and must produce pixel-consistent output.
+- **`CPURenderer` (software)** — planned. A software slab raycaster in a Web Worker pool; reads bricks from the core's store directly, writes RGBA, and blits to each canvas. Implements the same interface and must produce pixel-consistent output.
 
 **Application layer** owns:
 
@@ -80,14 +80,14 @@ Everything is TypeScript. Responsibilities split between the renderer-agnostic c
 
 ### 3.2 Renderer contract
 
-The core holds state; the active renderer is asked to (re)draw given viewports and is notified of state changes. This contract is what makes renderers swappable — nothing above it depends on WebGPU.
+The core holds state; the active renderer is asked to (re)draw given viewports and is notified of state changes. This contract is what makes renderers swappable.
 
 - **On load (streamed):** full image slices written into the brick store, one by one. The `GPURenderer` mirrors new/dirty bricks into GPU textures; the `CPURenderer` reads them in place.
 - **On interaction:** camera, window/level, blend mode, slab thickness, segmentation visibility, and label-table changes are pushed to the renderer.
 - **Per frame:** a render signal carrying only viewport identifiers.
 - **On demand:** single-voxel sampling for probes and measurements, served from the brick store.
 
-There is no foreign-function boundary — state lives in TypeScript objects the renderer reads. The only process boundary is main-thread ↔ Web Workers (decode, and the `CPURenderer`'s raycast pool), crossed with transferable buffers.
+State lives in TypeScript objects the renderer reads; the only process boundary is main-thread ↔ Web Workers (decode, and the `CPURenderer`'s raycast pool), crossed with transferable buffers.
 
 ---
 
@@ -99,7 +99,7 @@ A volume defines the mapping from voxel index space to patient/world space.
 - **World space**: millimeters, derived from `origin + direction * (index .* spacing)`.
 - **Canvas space**: pixels in a viewport's canvas.
 
-A segmentation shares the geometry of its image volume. Image and segmentation are sampled with identical coordinates by the renderer; no resampling at render time. Inputs not on the image grid are resampled to it at ingest.
+A segmentation shares the geometry of its image volume. Image and segmentation are sampled with identical coordinates by the renderer. Inputs not on the image grid are resampled to it at ingest.
 
 ---
 
@@ -119,7 +119,7 @@ Each brick is in one of three states: **Absent**, **Loading**, or **Resident**.
 
 The same page table serves four purposes: sparse storage, progressive load status, empty-space skipping during raycast, and dirty-region sync after edits (re-upload to GPU textures, or direct re-read on CPU).
 
-Alongside the page table, each image brick carries a **value range** (min/max of its voxels), computed once when the brick becomes Resident. This is the acceleration structure for empty-space skipping during raycast (§7.2): because a brick's contribution depends on the current window/level and blend mode — air is signal in MinIP, background in a soft-tissue composite — the range is tested per frame against the live view state rather than against any fixed intensity. It is a skip _hint_ layered over full storage, never a reason to drop a brick: every voxel is always stored, so switching blend mode or window never loses data.
+Alongside the page table, each image brick carries a **value range** (min/max of its voxels), computed once when the brick becomes Resident. This is the acceleration structure for empty-space skipping during raycast (§7.2): because a brick's contribution depends on the current window/level and blend mode — air is signal in MinIP, background in a soft-tissue composite — the range is tested per frame against the live view state. It is a skip _hint_ layered over full storage: every voxel is always stored, so switching blend mode or window never loses data.
 
 ### 5.2 Two-phase volume lifecycle
 
@@ -129,11 +129,11 @@ Renders run against partially-filled volumes. A brick becomes **Resident** once 
 
 ### 5.3 Progressive arrival
 
-Progressive means slices arrive **in full, one by one**, each at native resolution. There are no multi-resolution or coarse-to-fine levels, and no assumption about the wire encoding: the loader hands the engine complete slices, in any order, and each is written on arrival. The volume fills along the acquisition axis as its slices land; bricks flip to **Resident** band by band and become visible as soon as they complete.
+Progressive means slices arrive **in full, one by one**, each at native resolution: the loader hands the engine complete slices, in any order, and each is written on arrival. The volume fills along the acquisition axis as its slices land; bricks flip to **Resident** band by band and become visible as soon as they complete.
 
 ### 5.4 Scheduler
 
-Slice requests are prioritized by current viewport state, not FIFO:
+Slice requests are prioritized by current viewport state:
 
 - **Thin slab**: the slices intersecting the active slab first, then outward along the `normal` vector.
 - **Thick slab**: the slices spanning the slab first, then the rest of the volume in order.
@@ -144,7 +144,7 @@ The scheduler is told which viewport has priority, accepts prioritized slice req
 
 ## 6. Segmentation model
 
-Every image volume owns **exactly one** segmentation, created automatically when the volume is created and destroyed with it. The consumer never creates, attaches, or frees a segmentation; it is reached through the owning volume and is always present. Because storage is sparse (§5.1), an untouched segmentation allocates no bricks and costs effectively nothing until painted.
+Every image volume owns **exactly one** segmentation, created automatically when the volume is created and destroyed with it, reached through the owning volume, and always present. Because storage is sparse (§5.1), an untouched segmentation allocates no bricks and costs effectively nothing until painted.
 
 ### 6.1 Representation
 
@@ -156,7 +156,7 @@ Each voxel stores a **set of up to K segment indices** ("slots"), each a `u8`:
 | ----------------- | -------------- | ----------- | --------------- |
 | 4                 | `rgba8uint`    | 4           | 256             |
 
-Slots store the **full set** present at a voxel. Segmentation textures are point-sampled (never linearly filtered). Segmentations use the same brick pool + page table as image volumes, so they are sparse: only bricks containing segmented voxels are allocated.
+Slots store the **full set** present at a voxel. Segmentation textures are point-sampled. Segmentations use the same brick pool + page table as image volumes, so they are sparse: only bricks containing segmented voxels are allocated.
 
 ### 6.2 Label table
 
@@ -164,13 +164,13 @@ A 256-entry table holds per-segment style — color (rgb), fill opacity, and vis
 
 ### 6.3 Compositing rule
 
-**Projection along the ray.** The overlay is a **projection** of the slab, not a participating medium: marching the slab collects the **set of distinct visible segments** encountered anywhere along the ray, and each collected segment contributes **exactly once** to the pixel. A segment's rendered opacity is therefore independent of slab thickness — a 20% fill reads as 20% whether the slab crosses the segment at one sample or three hundred. The per-ray set is capped at **8 distinct segments**, kept in front-to-back encounter order (later segments are dropped); hidden segments never consume a slot.
+**Projection along the ray.** The overlay is a **projection** of the slab: marching the slab collects the **set of distinct visible segments** encountered anywhere along the ray, and each collected segment contributes **exactly once** to the pixel. A segment's rendered opacity is therefore independent of slab thickness — a 20% fill reads as 20% whether the slab crosses the segment at one sample or three hundred. The per-ray set is capped at **8 distinct segments**, kept in front-to-back encounter order (later segments are dropped); hidden segments never consume a slot.
 
 **In-plane styling.** Each projected segment renders as a **quasi-opaque border with a transparent fill**, evaluated on the segment's projected footprint in the view plane: a pixel within the border width of the footprint's boundary (an in-plane neighbor at that distance lacking the segment) contributes at near-full opacity (α ≈ 0.9), interior pixels at the segment's label opacity. The border width is a fixed number of voxels (default 3), widened to at least one on-screen pixel when zoomed out so borders never vanish. Segments blend **additively**: each contributing segment adds its premultiplied color (`color × α`), the summed color is clamped, and coverage accumulates as `1 − Π(1 − αₛ)`. Where segments overlap the sums brighten and shift hue, so overlap is directly visible. The combined color is blended over the grayscale by the accumulated coverage; a pixel whose ray crosses only hidden (or no) segments gets no overlay.
 
-Full storage of the slot set (rather than a precomputed composite) is what allows a segment to be erased or hidden and the remaining segments to keep rendering. The compositing function is isolated, so it's easy to replace later.
+Full storage of the slot set is what allows a segment to be erased or hidden and the remaining segments to keep rendering. The compositing function is isolated, so it's easy to replace later.
 
-**Antialiasing** is a per-viewport toggle (default on, §9). With it off, membership is the point-sampled projected footprint and both the silhouette and the border follow the voxel grid. With it on, each segment's coverage is computed by **low-pass filtering its projected membership with a compact, smooth 2D kernel in the view plane, wider than a voxel**; the smooth coverage in `[0, 1]` then drives **both** boundaries of the drawn segment as isocontours, so neither follows the voxel grid — at the cost of slightly rounding sub-voxel features. The outer silhouette is the coverage `0.5` contour (segment vs. background); the inner edge of the quasi-opaque outline is a **higher isocontour** (a fixed step deeper in coverage), which sits a roughly constant distance inside the boundary. Because both edges are `smoothstep` transitions of the same continuous coverage field, the border is anti-aliased on its outer _and_ inner edge, not just its silhouette. The kernel is **anchored to the voxel grid** (centred on the in-plane projection of the nearest voxel, taps spaced one in-plane voxel step apart) and weights each tap by a smooth function of its continuous in-plane distance to the sample point that falls to zero at the window edge; this makes the coverage field continuous as the sample point moves across the screen, which is what actually removes the staircase — sampling the mask at fixed offsets and rounding would instead yield a piecewise-constant field that still steps. The transition width of each contour tracks the on-screen pixel footprint, so edges stay roughly one pixel wide (crisp, not blurry) at any zoom. In this mode the outline width is set by the gap between the two isocontours rather than a fixed voxel count. Antialiasing changes only appearance, never the stored slot sets, and it costs extra fetches in the overlay resolve pass (§7.2), so it can be toggled off.
+**Antialiasing** is a per-viewport toggle (default on, §9). With it off, membership is the point-sampled projected footprint and both the silhouette and the border follow the voxel grid. With it on, each segment's coverage is computed by **low-pass filtering its projected membership with a compact, smooth 2D kernel in the view plane, wider than a voxel**; the smooth coverage in `[0, 1]` then drives **both** boundaries of the drawn segment as isocontours, so neither follows the voxel grid — at the cost of slightly rounding sub-voxel features. The outer silhouette is the coverage `0.5` contour (segment vs. background); the inner edge of the quasi-opaque outline is a **higher isocontour** (a fixed step deeper in coverage), which sits a roughly constant distance inside the boundary. Because both edges are `smoothstep` transitions of the same continuous coverage field, the border is anti-aliased on its outer _and_ inner edge. The kernel is **anchored to the voxel grid** (centred on the in-plane projection of the nearest voxel, taps spaced one in-plane voxel step apart) and weights each tap by a smooth function of its continuous in-plane distance to the sample point that falls to zero at the window edge; this makes the coverage field continuous as the sample point moves across the screen, which is what removes the staircase. The transition width of each contour tracks the on-screen pixel footprint, so edges stay crisp, roughly one pixel wide, at any zoom. In this mode the outline width is set by the gap between the two isocontours. Antialiasing changes only appearance, never the stored slot sets, and it costs extra fetches in the overlay resolve pass (§7.2), so it can be toggled off.
 
 ### 6.4 Editing
 
@@ -191,16 +191,18 @@ The editor carries an active segment, paints and erases over a brush region (sph
 
 Rendering goes through a swappable `Renderer` interface (§14). The `RenderingEngine` holds exactly one active renderer, chosen at init.
 
-- **`GPURenderer` (WebGPU)** — the implemented backend. One `GPUDevice` / `GPUQueue` per application; one canvas context per viewport canvas, rendering targets each canvas directly (no offscreen render-and-blit, no context pool); WGSL pipelines.
-- **`CPURenderer` (software)** — planned, not yet implemented. A software slab raycaster in a Web Worker pool, blitting pixels to each canvas. Same `Renderer` contract. If profiling requires it, its inner raycast kernel may later be compiled to WASM — an implementation detail, out of scope here.
-- **No WebGL2 backend.** The two tiers are WebGPU where a usable GPU is present, and the CPU renderer where it is not.
+- **`GPURenderer` (WebGPU)** — the implemented backend. One `GPUDevice` / `GPUQueue` per application; one canvas context per viewport canvas, rendering targets each canvas directly; WGSL pipelines.
+- **`CPURenderer` (software)** — planned. A software slab raycaster in a Web Worker pool, blitting pixels to each canvas. Same `Renderer` contract.
+- The two tiers are WebGPU where a usable GPU is present, and the CPU renderer where it is not.
 - Compute-dependent fast paths (gradient precompute, histogram-based auto window/level) are `GPURenderer`-only; the `CPURenderer` will provide CPU equivalents.
 
 ### 7.2 Pipeline
 
 One algorithm in two passes: an **orthographic slab raycast** followed by a **screen-space overlay resolve**. In the raycast pass, parallel rays are cast along the `normal` vector and marched from the near slab plane to `near + slabThickness`, accumulated by the blend mode; grayscale is mapped via window/level. The same march projects the segmentation (§6.3): each sample contributes one point-sampled slot-set fetch, merged into the ray's set of up to 8 distinct visible segments, written alongside the grayscale to a screen-size integer target (`rg32uint`, 8 packed indices per pixel). The resolve pass then evaluates the compositing rule on that projected buffer — border test, optional antialiasing, additive blending — **once per pixel, in 2D**, and blends the overlay over the grayscale; it is skipped entirely when the segmentation is hidden. Overlay cost is therefore independent of slab thickness: the neighborhood work (border test, antialiasing kernel) never multiplies with the sample count. Absent/empty bricks are skipped; gradient-based shading is optional. Both renderers implement this same algorithm — the `GPURenderer` as WGSL pipelines, the `CPURenderer` as CPU kernels — and must produce pixel-consistent output (enforced by golden-image cross-tests).
 
-**Empty-space skipping.** For thick-slab and full-volume modes, marching every sample is dominated by trilinear fetches through regions that cannot affect the result. Each sample first consults its brick's value range (§5.1, cached across consecutive samples in the same brick — one lookup per brick boundary crossed, not per sample) and skips the trilinear fetch when the brick cannot change the pixel under the current view state: for MIP when the brick max is at or below the running maximum, for MinIP when the brick min is at or above the running minimum, for Composite when the brick max maps below the window low (contributes zero). Average visits every sample (the mean depends on all of them). The skip never changes output: a value the gate skips at a brick boundary is captured where the ray passes through the brick that actually holds it. This is a correct optimization in every mode, not an approximation.
+**Empty-space skipping.** For thick-slab and full-volume modes, marching every sample is dominated by trilinear fetches through regions that cannot affect the result. Each sample first consults its brick's value range (§5.1, cached across consecutive samples in the same brick — one lookup per brick boundary crossed) and skips the trilinear fetch when the brick cannot change the pixel under the current view state: for MIP when the brick max is at or below the running maximum, for MinIP when the brick min is at or above the running minimum, for Composite when the brick max maps below the window low (contributes zero). Average visits every sample (the mean depends on all of them). The skip never changes output: a value the gate skips at a brick boundary is captured where the ray passes through the brick that actually holds it.
+
+**Brick leaping.** When a brick can affect neither the image (its value-range gate is closed for the current mode, or Composite opacity has saturated — never in Average) nor the overlay (segmentation hidden, brick unoccupied, or the per-ray segment set already full), the march does not step through it sample by sample: the ray's exit from the brick is computed analytically and iteration resumes at the sample just before the exit, so a skipped brick costs a few iterations instead of one per sample. The landing bias of one sample guarantees floating-point error can never jump past a sample the per-sample gates would have processed — leaping visits exactly the samples the gates would have accepted, so it never changes output. It is disabled by the empty-block debug toggle (§9), which walks every sample to draw brick outlines.
 
 **Segmentation-space skipping.** The same per-brick texel carries a segmentation occupancy flag, dilated by one brick so the point-sampled fetch (which rounds to the nearest voxel) can never reach a labeled voxel from a brick marked empty. Samples in unmarked bricks skip the segmentation fetch entirely — most of a thick-slab ray crosses unlabeled space. A ray whose segment set is already full (8 distinct segments) also stops fetching. Like the value-range gate, this never changes output.
 
@@ -208,9 +210,9 @@ One algorithm in two passes: an **orthographic slab raycast** followed by a **sc
 
 **Early ray termination.** In Composite, image accumulation stops once accumulated opacity saturates — deeper samples cannot change the grayscale. When the segmentation overlay is visible the ray keeps marching without image fetches so an in-front opaque structure never clips a segment projected from behind it; the ray terminates early only once the per-ray segment set is also full.
 
-Thin-slab views (the default, ~1 sample per ray) neither need nor pay for these optimizations; they target the marching-heavy thick-slab and full-volume paths.
+These optimizations target the marching-heavy thick-slab and full-volume paths and cost thin-slab views (the default, ~1 sample per ray) nothing.
 
-Sample count per ray scales with slab thickness at the volume's voxel pitch **along the ray** — one sample per index-space step in the slab direction, so anisotropic volumes are not oversampled along their coarse axes and arbitrarily deep stacks are never undersampled. The count is uncapped: ray clipping bounds the marched range to the volume overlap, so per-ray work is bounded by the volume's extent along the ray, not the slab thickness. One pipeline spans the full range of views:
+Sample count per ray scales with slab thickness at the volume's voxel pitch **along the ray** — one sample per index-space step in the slab direction, so anisotropic volumes are not oversampled along their coarse axes and arbitrarily deep stacks are never undersampled. The count is uncapped: ray clipping bounds the marched range to the volume overlap, so per-ray work is bounded by the volume's extent along the ray. One pipeline spans the full range of views:
 
 | orientation          | slab thickness | blend                 | result                        |
 | -------------------- | -------------- | --------------------- | ----------------------------- |
@@ -226,7 +228,7 @@ Composite, MIP, MinIP, and Average. Blend mode and slab thickness are viewport-l
 
 ### 7.4 Window/level
 
-The image appearance is window/level only (window width and window center), applied in-shader as a linear ramp into grayscale. No color LUT for image data.
+The image appearance is window/level only (window width and window center), applied in-shader as a linear ramp into grayscale.
 
 ### 7.5 Render loop
 
@@ -236,7 +238,7 @@ The loop lives in TypeScript. Viewports carry dirty flags. Each frame, the `Rend
 
 ## 8. Camera
 
-The camera is always orthographic; there is no perspective projection.
+The camera is always orthographic.
 
 - **Orientation**: preset axes (axial, sagittal, coronal, acquisition) or an arbitrary oblique `normal`.
 - **State** — the bare-minimum set that is stored and reapplied as-is (7 degrees of freedom):
@@ -248,11 +250,11 @@ The camera is always orthographic; there is no perspective projection.
   | `focalPoint` | `vec3`   | World-space point (mm) at the canvas center — supplies in-plane pan and depth. |
   | `zoom`       | `number` | Orthographic zoom (world mm per viewport half-height).                         |
 
-  Deliberately **not** stored, because they are redundant for an orthographic camera: a separate `position` (derivable as `focalPoint + normal * d` for any `d`; the rendered image is invariant to camera translation along `normal`), and a separate slab-center scalar (it is `focalPoint` projected onto `normal`).
+  A `position` is derivable as `focalPoint + normal * d` for any `d` (the rendered image is invariant to camera translation along `normal`), and the slab center is `focalPoint` projected onto `normal`.
 
-- **Slab navigation**: relative scrolling along the `normal` vector is an _operation_ that moves `focalPoint` along `normal`; the slab center is therefore read from `focalPoint`, not stored separately.
+- **Slab navigation**: relative scrolling along the `normal` vector is an _operation_ that moves `focalPoint` along `normal`; the slab center is therefore read from `focalPoint`.
 
-Camera state lives in TypeScript as the single source of truth. It computes world↔canvas transforms synchronously for the overlay, and the active renderer derives the view and orthographic-projection matrices from the same state — there is no separate mirror to keep in sync.
+Camera state lives in TypeScript as the single source of truth. It computes world↔canvas transforms synchronously for the overlay, and the active renderer derives the view and orthographic-projection matrices from the same state.
 
 ---
 
@@ -263,7 +265,7 @@ A viewport is bound to one canvas and one image volume, and exposes:
 - A camera (§8).
 - Visibility toggle for the volume's built-in segmentation.
 - Antialiasing toggle for the segmentation (§6.3).
-- Empty-block debug toggle (default off): draws a pink wireframe around the edges of bricks with no in-window content — the empty space the raycast skips (§7.2) — and disables early ray termination so the whole skipped structure is visible. Diagnostic only; changes nothing about what is stored or normally rendered.
+- Empty-block debug toggle (default off): draws a pink wireframe around the edges of bricks with no in-window content — the empty space the raycast skips (§7.2) — and disables early ray termination and brick leaping so the whole skipped structure is visible. Diagnostic only.
 - Window/level, blend mode, and slab thickness.
 - Synchronous world↔canvas coordinate transforms (computed TS-side).
 - On-demand single-voxel sampling (reads the CPU-resident brick store).
@@ -273,7 +275,7 @@ A viewport is bound to one canvas and one image volume, and exposes:
 
 ## 10. RenderingEngine
 
-There is exactly one `RenderingEngine` for the lifetime of the application. It is not constructed directly; it is reached through a module-level accessor that always returns the same instance. Initialization happens once before first use; calling it again is a no-op.
+There is exactly one `RenderingEngine` for the lifetime of the application, reached through a module-level accessor that always returns the same instance. Initialization happens once before first use; calling it again is a no-op.
 
 - **Options**: renderer selection (`GPURenderer` / `CPURenderer`; default auto — `GPURenderer` when WebGPU is available, otherwise `CPURenderer`), brick size (default 32), and segmentation overlap depth K (default 4, optionally 8).
 - **Volumes**: created from geometry and a voxel format (Int16, Uint16, Uint8, or Float32); each volume exposes its geometry, format, built-in segmentation, slice writes, and a slice-loaded query. Destroying a volume releases its brick store and the renderer's mirror of it; a volume still referenced by a live viewport cannot be destroyed — destroy the viewport first.
@@ -288,7 +290,7 @@ There is exactly one `RenderingEngine` for the lifetime of the application. It i
 
 Tools are TypeScript. They consume normalized interaction events and call viewport / editor / overlay APIs.
 
-Tool activation is **global**. A tool is registered once and is in exactly one state — active (bound to a mouse button / modifier and handling new gestures), passive (existing annotations stay interactive but no new gestures start), or disabled — for the whole application. That state applies to every viewport; there is no per-viewport tool grouping.
+Tool activation is **global**. A tool is registered once and is in exactly one state — active (bound to a mouse button / modifier and handling new gestures), passive (existing annotations stay interactive but no new gestures start), or disabled — for the whole application. That state applies to every viewport.
 
 ### 11.1 Camera tools
 
@@ -325,7 +327,7 @@ These call the segmentation editor, which writes voxel slots and triggers dirty-
 
 ### 11.4 Segmentation creation (prompt) tools
 
-These tools only capture a prompt gesture and hand it to a caller-supplied callback; the library does not produce labels itself. The callback (e.g. a model inference call) performs the segmentation and writes voxels through the editor it is given.
+These tools capture a prompt gesture and hand it to a caller-supplied callback. The callback (e.g. a model inference call) performs the segmentation and writes voxels through the editor it is given.
 
 | Tool              | Gesture                                                       |
 | ----------------- | ------------------------------------------------------------- |
@@ -338,7 +340,7 @@ The callback receives the prompt geometry (box bounds, or labeled points) togeth
 
 ## 12. Overlay & event layers
 
-- **OverlayLayer**: an SVG element positioned over each viewport's render canvas. Renders annotations, cursors, reference lines, and text. Redrawn on camera change and on annotation change. Segmentations are **not** drawn here — they render through the volume pipeline.
+- **OverlayLayer**: an SVG element positioned over each viewport's render canvas. Renders annotations, cursors, reference lines, and text. Redrawn on camera change and on annotation change. Segmentations render through the volume pipeline.
 
 - **Event layer**: listens to native pointer/wheel/touch on the canvas, produces a normalized event (viewport id, canvas point, world point, buttons, modifiers), and dispatches to whichever active tool matches the event's binding.
 
@@ -354,7 +356,7 @@ The library fires events for every action the caller may want to react to.
 
 Renderers are swappable behind a single interface; nothing above it depends on WebGPU. An implementation receives the renderer-agnostic state (scene, brick store, page tables, label table, camera, per-viewport view state) and is responsible only for producing pixels.
 
-The interface groups into: lifecycle (initialize; volume created / destroyed; register / resize / destroy a viewport canvas; destroy the renderer itself); state-sync notifications (brick uploaded / dirtied, label-table edit, and camera / window-level / blend / slab / segmentation-visibility changes); and render (draw the given viewport ids). The `GPURenderer` implements it against WebGPU — mirroring bricks into GPU textures, WGSL pipelines, one canvas context per viewport. The `CPURenderer` (planned) implements it as a worker-pool software raycaster reading the brick store directly. Identifiers are plain string ids / object references; there is no foreign-function boundary and no handle marshaling.
+The interface groups into: lifecycle (initialize; volume created / destroyed; register / resize / destroy a viewport canvas; destroy the renderer itself); state-sync notifications (brick uploaded / dirtied, label-table edit, and camera / window-level / blend / slab / segmentation-visibility changes); and render (draw the given viewport ids). The `GPURenderer` implements it against WebGPU — mirroring bricks into GPU textures, WGSL pipelines, one canvas context per viewport. The `CPURenderer` (planned) implements it as a worker-pool software raycaster reading the brick store directly. Identifiers are plain string ids / object references.
 
 The rest of the engine surface is ordinary TypeScript: viewport lifecycle; volume create and destroy plus slice writes and slice-loaded queries (volume creation also allocates the built-in segmentation); segmentation access by owning volume, label edits, paint / erase, stroke grouping, and undo / redo; viewport state setters (attached volume, segmentation visibility, camera, window/level, blend mode, slab thickness); and on-demand voxel sampling.
 
@@ -362,10 +364,10 @@ The rest of the engine surface is ordinary TypeScript: viewport lifecycle; volum
 
 ## 15. Browser & runtime requirements
 
-- WebGPU where a usable GPU is available (`GPURenderer`); a CPU software renderer (`CPURenderer`, planned) where it is not. No WebGL2 backend.
+- WebGPU where a usable GPU is available (`GPURenderer`); a CPU software renderer (`CPURenderer`, planned) where it is not.
 - Compute-dependent features (gradient precompute, histogram auto window/level) are a `GPURenderer` fast path; the `CPURenderer` will provide CPU equivalents.
 - The `GPURenderer`'s device/context/present run on the main thread. The `CPURenderer` runs in a Web Worker pool. Decode and heavy voxel operations run in Web Workers.
-- The host supplies fully decoded image slices; the library assumes no particular wire encoding.
+- The host supplies fully decoded image slices.
 
 ---
 
@@ -436,18 +438,17 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 - **RenderingEngine** (§10): singleton module accessor + one-time async init, `createVolume` / `createViewport`, volume and viewport destruction (a volume referenced by a live viewport is rejected), full engine teardown (stops the loop, releases resources, destroys the renderer, resets the singleton), and a `requestAnimationFrame` loop that uploads dirty bricks and redraws dirty viewports.
 - **GPURenderer** (§7, §14): WebGPU orthographic slab raycast in WGSL, one canvas context per viewport, per-brick texture upload.
 - **Blend modes** (§7.3): MIP, MinIP, Average. Composite is a basic front-to-back accumulation (grayscale used as opacity).
-- **Empty-space skipping, segmentation-space skipping & early ray termination** (§5.1, §7.2): a small `rgba32float` 3D texture (one texel per brick) carries the per-image-brick min/max value range, computed on residency, plus a segmentation occupancy flag dilated by one brick, maintained on segmentation upload; the range gates the per-sample trilinear fetch per blend mode against the live window/level, the occupancy flag gates all segmentation sampling, and rays are clipped analytically to the volume bounds before marching. Composite additionally stops image accumulation once opacity saturates and terminates the ray when a visible segment overlay has saturated too. A per-viewport **empty-block debug toggle** (§9) draws these skipped bricks as a pink wireframe.
+- **Empty-space skipping, segmentation-space skipping & early ray termination** (§5.1, §7.2): a small `rgba32float` 3D texture (one texel per brick) carries the per-image-brick min/max value range, computed on residency, plus a segmentation occupancy flag dilated by one brick, maintained on segmentation upload; the range gates the per-sample trilinear fetch per blend mode against the live window/level, the occupancy flag gates all segmentation sampling, and rays are clipped analytically to the volume bounds before marching. When a brick is gated on both counts the ray leaps to its exit instead of stepping through it (§7.2). Composite additionally stops image accumulation once opacity saturates and terminates the ray once the per-ray segment set is also full. A per-viewport **empty-block debug toggle** (§9) draws these skipped bricks as a pink wireframe.
 - **Segmentation** (§6.1–6.2): built-in 1:1 segmentation per volume with K=4 slot sets, sphere paint writes with slot-overflow eviction (lowest index), present-segment listing, a 256-entry label table (color / opacity / visibility, versioned), and dirty-brick sync through the renderer contract.
 - **Segmentation rendering** (§6.3): point-sampled slot sets composited in the raycast shader — quasi-opaque border (3 voxels wide) where an in-plane neighbor lacks the segment, transparent fill inside, every visible segment blended additively, accumulated front-to-back along the slab and blended over the grayscale sample — with per-viewport visibility and antialiasing toggles (antialiasing derives a smooth silhouette and outline from a grid-anchored, continuous blurred coverage field with a screen-space-adaptive edge, on by default).
 
 ### 18.2 Simplifications
 
 - The CPU brick store keeps a **dense** voxel array; the page table tracks residency for streaming and dirty-region upload rather than backing a packed sparse pool.
-- The `GPURenderer` mirrors each volume into a single dense **`r32float` 3D texture** (not an atlas); resident bricks are written as texture sub-regions. Image sampling is trilinear, satisfying the Linear default: hardware-filtered through a sampler when the adapter supports `float32-filterable` (one fetch per sample), falling back to a manual 8-tap `textureLoad` reconstruction otherwise. Because a dense volume and the staging for its brick uploads can be large, the device is requested with the adapter's maximum `maxBufferSize` and `maxTextureDimension3D` rather than the conservative defaults.
+- The `GPURenderer` mirrors each volume into a single dense **`r32float` 3D texture** (not an atlas); resident bricks are written as texture sub-regions. Image sampling is trilinear, satisfying the Linear default: hardware-filtered through a sampler when the adapter supports `float32-filterable` (one fetch per sample), falling back to a manual 8-tap `textureLoad` reconstruction otherwise. Because a dense volume and the staging for its brick uploads can be large, the device is requested with the adapter's maximum `maxBufferSize` and `maxTextureDimension3D`.
 - The segmentation store is likewise a dense slot-set array (4 bytes/voxel); the `GPURenderer` mirrors it into a dense **`rgba8uint` 3D texture** created lazily on the first paint, with the label table in a per-volume uniform buffer re-uploaded when its version changes.
 - Voxel writes are exposed directly on the segmentation (sphere paint); the editor abstraction (§6.4 — active segment, erase, stroke grouping, undo/redo) is not built yet.
 - The scheduler (§5.4) is not prioritized: arrivals are coalesced into per-frame dirty-brick uploads in slice order.
-- Empty-space and segmentation-space skipping (§7.2) gate a **fixed-step** march (they skip a sample's fetches) rather than jumping the ray to the next non-empty brick boundary; the loop still iterates every sample inside the ray's clipped in-volume range. This removes the dominant fetch cost in skippable regions without the thread divergence of a per-ray DDA. A true skip-ahead traversal can replace it later if measured.
 
 ### 18.3 Not yet implemented
 
