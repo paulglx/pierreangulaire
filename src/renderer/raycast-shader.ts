@@ -1,14 +1,9 @@
 import type { TexelType } from './atlas';
 
-export const SEG_SLOTS_PER_AXIS = 8;
-
 const VOLUME_FETCH = /* wgsl */ `
-fn slotCoord(slot: i32, slotsPerAxis: i32) -> vec3<i32> {
-  return vec3<i32>(
-    slot % slotsPerAxis,
-    (slot / slotsPerAxis) % slotsPerAxis,
-    slot / (slotsPerAxis * slotsPerAxis),
-  );
+fn slotCoord(slotEntry: i32) -> vec3<i32> {
+  let packed = slotEntry - 1;
+  return vec3<i32>(packed & 1023, (packed >> 10u) & 1023, packed >> 20u);
 }
 
 fn loadVoxel(c: vec3<i32>) -> f32 {
@@ -126,7 +121,7 @@ fn slotsAt(q: vec3<f32>) -> vec4<u32> {
   if (slotEntry == 0) {
     return vec4<u32>(0u);
   }
-  let coord = slotCoord(slotEntry - 1, ${SEG_SLOTS_PER_AXIS}) * brickSize + c - bc * brickSize;
+  let coord = slotCoord(slotEntry) * brickSize + c - bc * brickSize;
   return textureLoad(segmentation, coord, 0);
 }
 

@@ -5,20 +5,23 @@ import { dot } from '../math';
 import type { DebugView, Viewport } from '../viewport';
 import { applyRescale, type Volume } from '../volume';
 import {
+  atlasSide,
   cellTextureFormat,
+  MAX_SLOTS_PER_AXIS,
+  packSlotEntry,
   poolSampleType,
   poolTexelType,
   poolTextureFormat,
-  slotOrigin,
+  slotCoord,
+  unpackSlotEntry,
   type TexelType,
 } from './atlas';
-import { raycastShader, SEG_SLOTS_PER_AXIS, segmentationResolveShader } from './raycast-shader';
+import { raycastShader, segmentationResolveShader } from './raycast-shader';
 import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 48;
 const RANGE_FLOATS = 4;
 const TIMESTAMP_BYTES = 16;
-const SEG_SLOTS_PER_LAYER = SEG_SLOTS_PER_AXIS * SEG_SLOTS_PER_AXIS;
 
 interface VolumeResource {
   format: VolumeFormat;
@@ -357,14 +360,15 @@ export class GPURenderer implements Renderer {
       const [w, h, d] = brick.size;
       let slotEntry = resource.pageData[index]!;
       if (slotEntry === 0) {
-        slotEntry = ++resource.segSlotCount;
+        slotEntry = packSlotEntry(slotCoord(resource.segSlotCount++));
         resource.pageData[index] = slotEntry;
         this.writePageTexel(resource, grid, index);
       }
+      const slot = unpackSlotEntry(slotEntry);
       this.device.queue.writeTexture(
         {
           texture: resource.segAtlas!,
-          origin: slotOrigin(slotEntry - 1, SEG_SLOTS_PER_AXIS, brickSize),
+          origin: { x: slot.x * brickSize, y: slot.y * brickSize, z: slot.z * brickSize },
         },
         brick.data,
         { bytesPerRow: w * 8, rowsPerImage: h },
@@ -424,23 +428,23 @@ export class GPURenderer implements Renderer {
     brickSize: number,
     slotsNeeded: number,
   ): void {
-    const currentLayers = resource.segAtlas ? resource.segAtlas.depthOrArrayLayers / brickSize : 0;
-    if (slotsNeeded <= currentLayers * SEG_SLOTS_PER_LAYER) return;
-    const maxLayers = Math.floor(this.device.limits.maxTextureDimension3D / brickSize);
-    const layers = Math.min(
-      maxLayers,
-      Math.max(Math.ceil(slotsNeeded / SEG_SLOTS_PER_LAYER), currentLayers * 2),
+    const currentSide = resource.segAtlas ? resource.segAtlas.width / brickSize : 0;
+    if (slotsNeeded <= currentSide ** 3) return;
+    const maxSide = Math.min(
+      MAX_SLOTS_PER_AXIS,
+      Math.floor(this.device.limits.maxTextureDimension3D / brickSize),
     );
-    if (slotsNeeded > layers * SEG_SLOTS_PER_LAYER) {
+    const side = atlasSide(slotsNeeded);
+    if (side > maxSide) {
       throw new Error(
-        `Segmentation atlas cannot hold ${slotsNeeded} bricks (max ${layers * SEG_SLOTS_PER_LAYER}).`,
+        `Segmentation atlas cannot hold ${slotsNeeded} bricks (max ${maxSide ** 3}).`,
       );
     }
     const atlas = this.device.createTexture({
       size: {
-        width: SEG_SLOTS_PER_AXIS * brickSize,
-        height: SEG_SLOTS_PER_AXIS * brickSize,
-        depthOrArrayLayers: layers * brickSize,
+        width: side * brickSize,
+        height: side * brickSize,
+        depthOrArrayLayers: side * brickSize,
       },
       dimension: '3d',
       format: 'rgba16uint',

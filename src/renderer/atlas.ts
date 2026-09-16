@@ -2,15 +2,48 @@ import type { VolumeFormat } from '../geometry';
 
 export type TexelType = 'f32' | 'i32' | 'u32';
 
-export function slotOrigin(
-  slot: number,
-  slotsPerAxis: number,
-  brickSize: number,
-): { x: number; y: number; z: number } {
+const SLOT_COORD_BITS = 10;
+const SLOT_COORD_MASK = (1 << SLOT_COORD_BITS) - 1;
+export const MAX_SLOTS_PER_AXIS = 1 << SLOT_COORD_BITS;
+
+export interface SlotCoord {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export function atlasSide(slotCount: number): number {
+  let side = Math.ceil(Math.cbrt(slotCount));
+  while (side > 0 && (side - 1) ** 3 >= slotCount) side--;
+  while (side ** 3 < slotCount) side++;
+  return side;
+}
+
+export function slotCoord(slot: number): SlotCoord {
+  const shell = atlasSide(slot + 1) - 1;
+  const side = shell + 1;
+  let offset = slot - shell ** 3;
+  if (offset < side * side) {
+    return { x: offset % side, y: Math.floor(offset / side), z: shell };
+  }
+  offset -= side * side;
+  if (offset < side * shell) {
+    return { x: offset % side, y: shell, z: Math.floor(offset / side) };
+  }
+  offset -= side * shell;
+  return { x: shell, y: offset % shell, z: Math.floor(offset / shell) };
+}
+
+export function packSlotEntry(coord: SlotCoord): number {
+  return 1 + (coord.x | (coord.y << SLOT_COORD_BITS) | (coord.z << (2 * SLOT_COORD_BITS)));
+}
+
+export function unpackSlotEntry(entry: number): SlotCoord {
+  const packed = entry - 1;
   return {
-    x: (slot % slotsPerAxis) * brickSize,
-    y: (Math.floor(slot / slotsPerAxis) % slotsPerAxis) * brickSize,
-    z: Math.floor(slot / (slotsPerAxis * slotsPerAxis)) * brickSize,
+    x: packed & SLOT_COORD_MASK,
+    y: (packed >> SLOT_COORD_BITS) & SLOT_COORD_MASK,
+    z: packed >> (2 * SLOT_COORD_BITS),
   };
 }
 
