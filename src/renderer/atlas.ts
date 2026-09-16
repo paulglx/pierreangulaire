@@ -1,22 +1,6 @@
 import type { VolumeFormat } from '../geometry';
 
-export interface PoolShape {
-  readonly slotsPerAxis: number;
-  readonly layers: number;
-}
-
 export type TexelType = 'f32' | 'i32' | 'u32';
-
-export function poolShape(capacity: number, brickSize: number, maxDimension: number): PoolShape {
-  const maxSlotsPerAxis = Math.floor(maxDimension / brickSize);
-  const slotsPerAxis = Math.max(1, Math.ceil(Math.cbrt(capacity)));
-  if (slotsPerAxis > maxSlotsPerAxis) {
-    throw new Error(
-      `Brick pool cannot hold ${capacity} bricks of ${brickSize}³ within a ${maxDimension}³ texture.`,
-    );
-  }
-  return { slotsPerAxis, layers: Math.ceil(capacity / (slotsPerAxis * slotsPerAxis)) };
-}
 
 export function slotOrigin(
   slot: number,

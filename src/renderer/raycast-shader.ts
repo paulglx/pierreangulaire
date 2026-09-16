@@ -12,17 +12,8 @@ fn slotCoord(slot: i32, slotsPerAxis: i32) -> vec3<i32> {
 }
 
 fn loadVoxel(c: vec3<i32>) -> f32 {
-  let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
-  let clamped = clamp(c, vec3<i32>(0), maxIndex);
-  let brickSize = i32(U.brickSize);
-  let bc = clamped / brickSize;
-  let slotEntry = textureLoad(pageTable, bc, 0).x;
-  if (slotEntry == 0) {
-    return U.rescaleIntercept;
-  }
-  let local = clamped - bc * brickSize;
-  let coord = slotCoord(slotEntry - 1, i32(U.poolSlotsPerAxis)) * brickSize + local;
-  return f32(textureLoad(volume, coord, 0).x) * U.rescaleSlope + U.rescaleIntercept;
+  let clamped = clamp(c, vec3<i32>(0), vec3<i32>(U.dims) - vec3<i32>(1));
+  return f32(textureLoad(volume, clamped, 0).x) * U.rescaleSlope + U.rescaleIntercept;
 }
 
 fn sampleTrilinear(q: vec3<f32>) -> f32 {
@@ -70,7 +61,6 @@ struct Uniforms {
   rescaleSlope: f32,
   bricksPerAxis: vec3<f32>,
   rescaleIntercept: f32,
-  poolSlotsPerAxis: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
@@ -121,14 +111,14 @@ override DEBUG_EMPTY: bool;
 @group(0) @binding(2) var segmentation: texture_3d<u32>;
 @group(0) @binding(3) var<storage, read> labels: array<vec4<f32>>;
 @group(0) @binding(4) var brickRange: texture_3d<f32>;
-@group(0) @binding(5) var pageTable: texture_3d<i32>;
+@group(0) @binding(5) var segPageTable: texture_3d<i32>;
 ${VOLUME_FETCH}
 fn slotsAt(q: vec3<f32>) -> vec4<u32> {
   let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
   let c = clamp(vec3<i32>(round(q)), vec3<i32>(0), maxIndex);
   let brickSize = i32(U.brickSize);
   let bc = c / brickSize;
-  let slotEntry = textureLoad(pageTable, bc, 0).y;
+  let slotEntry = textureLoad(segPageTable, bc, 0).x;
   if (slotEntry == 0) {
     return vec4<u32>(0u);
   }
@@ -223,10 +213,10 @@ fn fs(in: VertexOut) -> FragOut {
     let bc = brickCoord(q);
     if (any(bc != lastBrick)) {
       let r = textureLoad(brickRange, bc, 0);
-      brickResident = textureLoad(pageTable, bc, 0).x != 0;
       brickMin = r.x;
       brickMax = r.y;
       segOccupied = r.z;
+      brickResident = r.w > 0.5;
       lastBrick = bc;
     }
 

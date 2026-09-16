@@ -6,7 +6,6 @@ import type { Viewport } from '../viewport';
 import { applyRescale, type Volume } from '../volume';
 import {
   poolSampleType,
-  poolShape,
   poolTexelType,
   poolTextureFormat,
   slotOrigin,
@@ -17,15 +16,12 @@ import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 48;
 const RANGE_FLOATS = 4;
-const PAGE_INTS = 2;
 const SEG_SLOTS_PER_LAYER = SEG_SLOTS_PER_AXIS * SEG_SLOTS_PER_AXIS;
 
 interface VolumeResource {
   format: VolumeFormat;
   pool: GPUTexture;
   poolView: GPUTextureView;
-  poolSlotsPerAxis: number;
-  poolSlotCount: number;
   rangeTexture: GPUTexture;
   rangeView: GPUTextureView;
   rangeData: Float32Array;
@@ -209,16 +205,17 @@ export class GPURenderer implements Renderer {
   }
 
   onVolumeCreated(volume: Volume): void {
-    const { brickSize, bricksPerAxis } = volume.store;
-    const [nbx, nby, nbz] = bricksPerAxis;
+    const [nbx, nby, nbz] = volume.store.bricksPerAxis;
     const brickCount = nbx * nby * nbz;
-    const shape = poolShape(brickCount, brickSize, this.device.limits.maxTextureDimension3D);
+    const [dx, dy, dz] = volume.geometry.dims;
+    const maxDimension = this.device.limits.maxTextureDimension3D;
+    if (Math.max(dx, dy, dz) > maxDimension) {
+      throw new Error(
+        `Volume ${dx}×${dy}×${dz} exceeds the device's 3D texture limit of ${maxDimension}.`,
+      );
+    }
     const pool = this.device.createTexture({
-      size: {
-        width: shape.slotsPerAxis * brickSize,
-        height: shape.slotsPerAxis * brickSize,
-        depthOrArrayLayers: shape.layers * brickSize,
-      },
+      size: { width: dx, height: dy, depthOrArrayLayers: dz },
       dimension: '3d',
       format: poolTextureFormat(volume.format),
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
@@ -232,21 +229,19 @@ export class GPURenderer implements Renderer {
     const pageTexture = this.device.createTexture({
       size: { width: nbx, height: nby, depthOrArrayLayers: nbz },
       dimension: '3d',
-      format: 'rg32sint',
+      format: 'r32sint',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     this.volumes.set(volume.id, {
       format: volume.format,
       pool,
       poolView: pool.createView(),
-      poolSlotsPerAxis: shape.slotsPerAxis,
-      poolSlotCount: 0,
       rangeTexture,
       rangeView: rangeTexture.createView(),
       rangeData: new Float32Array(brickCount * RANGE_FLOATS),
       pageTexture,
       pageView: pageTexture.createView(),
-      pageData: new Int32Array(brickCount * PAGE_INTS),
+      pageData: new Int32Array(brickCount),
       segOccupancy: new Uint8Array(brickCount),
       segAtlas: null,
       segAtlasView: null,
@@ -280,22 +275,14 @@ export class GPURenderer implements Renderer {
   uploadBricks(volume: Volume, brickIndices: number[]): void {
     const resource = this.volumes.get(volume.id);
     if (!resource) return;
-    const { brickSize, bricksPerAxis } = volume.store;
+    const { bricksPerAxis } = volume.store;
     const rowBytes = bytesPerVoxel(volume.format);
     for (const index of brickIndices) {
       const brick = volume.store.readBrick(index);
       const [w, h, d] = brick.size;
-      let slotEntry = resource.pageData[index * PAGE_INTS]!;
-      if (slotEntry === 0) {
-        slotEntry = ++resource.poolSlotCount;
-        resource.pageData[index * PAGE_INTS] = slotEntry;
-        this.writePageTexel(resource, bricksPerAxis, index);
-      }
+      const [x, y, z] = brick.origin;
       this.device.queue.writeTexture(
-        {
-          texture: resource.pool,
-          origin: slotOrigin(slotEntry - 1, resource.poolSlotsPerAxis, brickSize),
-        },
+        { texture: resource.pool, origin: { x, y, z } },
         brick.data,
         { bytesPerRow: w * rowBytes, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
@@ -304,6 +291,7 @@ export class GPURenderer implements Renderer {
       const hi = applyRescale(volume.rescale, brick.max);
       resource.rangeData[index * RANGE_FLOATS] = Math.min(lo, hi);
       resource.rangeData[index * RANGE_FLOATS + 1] = Math.max(lo, hi);
+      resource.rangeData[index * RANGE_FLOATS + 3] = 1;
       this.writeRangeTexel(resource, bricksPerAxis, index);
     }
   }
@@ -314,7 +302,7 @@ export class GPURenderer implements Renderer {
     const brickSize = volume.segmentation.brickSize;
     let slotsNeeded = resource.segSlotCount;
     for (const index of brickIndices) {
-      if (resource.pageData[index * PAGE_INTS + 1] === 0) slotsNeeded++;
+      if (resource.pageData[index] === 0) slotsNeeded++;
     }
     this.ensureSegAtlasCapacity(resource, brickSize, slotsNeeded);
     const grid = volume.segmentation.bricksPerAxis;
@@ -322,10 +310,10 @@ export class GPURenderer implements Renderer {
     for (const index of brickIndices) {
       const brick = volume.segmentation.readBrick(index);
       const [w, h, d] = brick.size;
-      let slotEntry = resource.pageData[index * PAGE_INTS + 1]!;
+      let slotEntry = resource.pageData[index]!;
       if (slotEntry === 0) {
         slotEntry = ++resource.segSlotCount;
-        resource.pageData[index * PAGE_INTS + 1] = slotEntry;
+        resource.pageData[index] = slotEntry;
         this.writePageTexel(resource, grid, index);
       }
       this.device.queue.writeTexture(
@@ -381,7 +369,7 @@ export class GPURenderer implements Renderer {
     this.device.queue.writeTexture(
       { texture: resource.pageTexture, origin: brickTexel(grid, index) },
       resource.pageData,
-      { offset: index * PAGE_INTS * 4, bytesPerRow: PAGE_INTS * 4, rowsPerImage: 1 },
+      { offset: index * 4, bytesPerRow: 4, rowsPerImage: 1 },
       { width: 1, height: 1, depthOrArrayLayers: 1 },
     );
   }
@@ -500,12 +488,7 @@ export class GPURenderer implements Renderer {
       }
 
       const segEnabled = viewport.segmentationVisible && volumeResource.segAtlas !== null;
-      writeUniforms(
-        resource.uniformData,
-        viewport,
-        viewport.segmentationAntialiasing,
-        volumeResource.poolSlotsPerAxis,
-      );
+      writeUniforms(resource.uniformData, viewport, viewport.segmentationAntialiasing);
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
 
       const canvasTexture = resource.context.getCurrentTexture();
@@ -635,12 +618,7 @@ function brickNeighborhood(grid: readonly [number, number, number], index: numbe
   return out;
 }
 
-function writeUniforms(
-  arr: Float32Array,
-  viewport: Viewport,
-  segAntialias: boolean,
-  poolSlotsPerAxis: number,
-): void {
+function writeUniforms(arr: Float32Array, viewport: Viewport, segAntialias: boolean): void {
   const camera = viewport.camera;
   const { right, trueUp, normal } = camera.basis();
   const geometry = viewport.volume.geometry;
@@ -709,5 +687,4 @@ function writeUniforms(
   arr[41] = store.bricksPerAxis[1];
   arr[42] = store.bricksPerAxis[2];
   arr[43] = viewport.volume.rescale.intercept;
-  arr[44] = poolSlotsPerAxis;
 }
