@@ -97,9 +97,44 @@ test('int16 store keeps raw voxels in per-brick arrays and exposes exact-size br
   expect(edge.data.length).toBe(24);
   expect(edge.min).toBe(-8);
   expect(edge.max).toBe(11);
+  expect(edge.cellGrid).toEqual([1, 1, 1]);
+  expect([...edge.cellRanges]).toEqual([-8, 11]);
   expect(edge.data[0]).toBe(-8);
   expect(edge.data[1]).toBe(-7);
   expect(edge.data[2]).toBe(-2);
+});
+
+test('brick size must be a multiple of the cell size', () => {
+  const geometry: VolumeGeometry = {
+    dims: [8, 4, 5],
+    spacing: [1, 1, 1],
+    origin: [0, 0, 0],
+    direction: identity,
+  };
+  expect(() => new BrickStore(geometry, 'uint8', 6)).toThrow(/multiple of the cell size/);
+});
+
+test('brick cell ranges cover each 4³ cell and partial cells at the volume edge', () => {
+  const geometry: VolumeGeometry = {
+    dims: [8, 4, 5],
+    spacing: [1, 1, 1],
+    origin: [0, 0, 0],
+    direction: identity,
+  };
+  const store = new BrickStore(geometry, 'uint8', 8);
+  const plane = new Uint8Array(32);
+  for (let k = 0; k < 5; k++) {
+    plane.fill(k);
+    plane[7] = 100 + k;
+    store.writeSlice(k, plane);
+  }
+  const brick = store.readBrick(0);
+  expect(brick.size).toEqual([8, 4, 5]);
+  expect(brick.cellGrid).toEqual([2, 1, 2]);
+  expect(brick.cellRanges).toBeInstanceOf(Uint8Array);
+  expect([...brick.cellRanges]).toEqual([0, 3, 0, 103, 4, 4, 4, 104]);
+  expect(brick.min).toBe(0);
+  expect(brick.max).toBe(104);
 });
 
 test('volume sampling applies the rescale to raw stored voxels', () => {

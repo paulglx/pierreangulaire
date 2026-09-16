@@ -1,10 +1,11 @@
-import { bytesPerVoxel } from '../brick-store';
+import { bytesPerVoxel, CELL_SIZE } from '../brick-store';
 import type { BlendMode } from '../blend';
 import type { VolumeFormat } from '../geometry';
 import { dot } from '../math';
 import type { DebugView, Viewport } from '../viewport';
 import { applyRescale, type Volume } from '../volume';
 import {
+  cellTextureFormat,
   poolSampleType,
   poolTexelType,
   poolTextureFormat,
@@ -23,6 +24,8 @@ interface VolumeResource {
   format: VolumeFormat;
   pool: GPUTexture;
   poolView: GPUTextureView;
+  cellTexture: GPUTexture;
+  cellView: GPUTextureView;
   rangeTexture: GPUTexture;
   rangeView: GPUTextureView;
   rangeData: Float32Array;
@@ -176,6 +179,11 @@ export class GPURenderer implements Renderer {
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: 'sint', viewDimension: '3d' },
         },
+        {
+          binding: 6,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: poolSampleType(format), viewDimension: '3d' },
+        },
       ],
     });
     this.layouts.set(texelType, layout);
@@ -235,6 +243,16 @@ export class GPURenderer implements Renderer {
       format: poolTextureFormat(volume.format),
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
+    const cellTexture = this.device.createTexture({
+      size: {
+        width: Math.ceil(dx / CELL_SIZE),
+        height: Math.ceil(dy / CELL_SIZE),
+        depthOrArrayLayers: Math.ceil(dz / CELL_SIZE),
+      },
+      dimension: '3d',
+      format: cellTextureFormat(volume.format),
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
     const rangeTexture = this.device.createTexture({
       size: { width: nbx, height: nby, depthOrArrayLayers: nbz },
       dimension: '3d',
@@ -251,6 +269,8 @@ export class GPURenderer implements Renderer {
       format: volume.format,
       pool,
       poolView: pool.createView(),
+      cellTexture,
+      cellView: cellTexture.createView(),
       rangeTexture,
       rangeView: rangeTexture.createView(),
       rangeData: new Float32Array(brickCount * RANGE_FLOATS),
@@ -301,6 +321,16 @@ export class GPURenderer implements Renderer {
         brick.data,
         { bytesPerRow: w * rowBytes, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
+      );
+      const [cx, cy, cz] = brick.cellGrid;
+      this.device.queue.writeTexture(
+        {
+          texture: resource.cellTexture,
+          origin: { x: x / CELL_SIZE, y: y / CELL_SIZE, z: z / CELL_SIZE },
+        },
+        brick.cellRanges,
+        { bytesPerRow: cx * rowBytes * 2, rowsPerImage: cy },
+        { width: cx, height: cy, depthOrArrayLayers: cz },
       );
       const lo = applyRescale(volume.rescale, brick.min);
       const hi = applyRescale(volume.rescale, brick.max);
@@ -512,6 +542,7 @@ export class GPURenderer implements Renderer {
             { binding: 3, resource: { buffer: volumeResource.labelBuffer } },
             { binding: 4, resource: volumeResource.rangeView },
             { binding: 5, resource: volumeResource.pageView },
+            { binding: 6, resource: volumeResource.cellView },
           ],
         });
         resource.bindGroupVolumeId = viewport.volume.id;
@@ -646,6 +677,7 @@ async function readFrameTiming(viewport: Viewport, timing: FrameTiming): Promise
 
 function releaseVolumeResource(resource: VolumeResource): void {
   resource.pool.destroy();
+  resource.cellTexture.destroy();
   resource.rangeTexture.destroy();
   resource.pageTexture.destroy();
   resource.segAtlas?.destroy();
@@ -753,4 +785,8 @@ function writeUniforms(arr: Float32Array, viewport: Viewport, segAntialias: bool
   arr[41] = store.bricksPerAxis[1];
   arr[42] = store.bricksPerAxis[2];
   arr[43] = viewport.volume.rescale.intercept;
+  arr[44] = Math.ceil(dims[0] / CELL_SIZE);
+  arr[45] = Math.ceil(dims[1] / CELL_SIZE);
+  arr[46] = Math.ceil(dims[2] / CELL_SIZE);
+  arr[47] = CELL_SIZE;
 }

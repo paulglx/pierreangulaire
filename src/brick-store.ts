@@ -6,12 +6,16 @@ export type BrickState = (typeof BrickState)[keyof typeof BrickState];
 
 export type VoxelArray = Int16Array | Uint16Array | Uint8Array | Float32Array;
 
+export const CELL_SIZE = 4;
+
 export interface BrickRegion {
   readonly origin: readonly [number, number, number];
   readonly size: readonly [number, number, number];
   readonly data: VoxelArray;
   readonly min: number;
   readonly max: number;
+  readonly cellGrid: readonly [number, number, number];
+  readonly cellRanges: VoxelArray;
 }
 
 export interface BrickBounds {
@@ -85,6 +89,9 @@ export class BrickStore {
   private readonly dirty = new Set<number>();
 
   constructor(geometry: VolumeGeometry, format: VolumeFormat, brickSize: number) {
+    if (brickSize % CELL_SIZE !== 0) {
+      throw new Error(`Brick size ${brickSize} must be a multiple of the cell size ${CELL_SIZE}.`);
+    }
     this.geometry = geometry;
     this.format = format;
     this.brickSize = brickSize;
@@ -155,14 +162,39 @@ export class BrickStore {
     );
     const [w, h, d] = size;
     const data = this.bricks[linearIndex] ?? createVoxelArray(this.format, w * h * d);
+    const cellGrid: [number, number, number] = [
+      Math.ceil(w / CELL_SIZE),
+      Math.ceil(h / CELL_SIZE),
+      Math.ceil(d / CELL_SIZE),
+    ];
+    const [cx, cy, cz] = cellGrid;
+    const cellRanges = createVoxelArray(this.format, cx * cy * cz * 2);
     let min = Infinity;
     let max = -Infinity;
-    for (let i = 0; i < data.length; i++) {
-      const value = data[i]!;
-      if (value < min) min = value;
-      if (value > max) max = value;
+    for (let c = 0; c < cz; c++) {
+      for (let b = 0; b < cy; b++) {
+        for (let a = 0; a < cx; a++) {
+          let lo = Infinity;
+          let hi = -Infinity;
+          for (let z = c * CELL_SIZE; z < Math.min(d, (c + 1) * CELL_SIZE); z++) {
+            for (let y = b * CELL_SIZE; y < Math.min(h, (b + 1) * CELL_SIZE); y++) {
+              const row = (z * h + y) * w;
+              for (let x = a * CELL_SIZE; x < Math.min(w, (a + 1) * CELL_SIZE); x++) {
+                const value = data[row + x]!;
+                if (value < lo) lo = value;
+                if (value > hi) hi = value;
+              }
+            }
+          }
+          const cell = (a + b * cx + c * cx * cy) * 2;
+          cellRanges[cell] = lo;
+          cellRanges[cell + 1] = hi;
+          if (lo < min) min = lo;
+          if (hi > max) max = hi;
+        }
+      }
     }
-    return { origin, size, data, min, max };
+    return { origin, size, data, min, max, cellGrid, cellRanges };
   }
 
   sampleVoxel(i: number, j: number, k: number): number {

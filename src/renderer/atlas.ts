@@ -27,6 +27,19 @@ export function poolTextureFormat(format: VolumeFormat): GPUTextureFormat {
   }
 }
 
+export function cellTextureFormat(format: VolumeFormat): GPUTextureFormat {
+  switch (format) {
+    case 'int16':
+      return 'rg16sint';
+    case 'uint16':
+      return 'rg16uint';
+    case 'uint8':
+      return 'rg8uint';
+    case 'float32':
+      return 'rg32float';
+  }
+}
+
 export function poolSampleType(format: VolumeFormat): GPUTextureSampleType {
   switch (format) {
     case 'int16':

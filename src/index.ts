@@ -17,7 +17,7 @@ export type { Orientation, CameraBasis, CanvasPoint } from './camera';
 export { BlendMode } from './blend';
 export type { WindowLevel } from './blend';
 
-export { BrickStore, BrickState, bytesPerVoxel } from './brick-store';
+export { BrickStore, BrickState, bytesPerVoxel, CELL_SIZE } from './brick-store';
 export type { BrickRegion, VoxelArray } from './brick-store';
 
 export { indexToWorld, worldToIndex, volumeCenter, worldExtent, voxelCount } from './geometry';

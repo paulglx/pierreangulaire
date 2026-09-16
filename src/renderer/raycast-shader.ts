@@ -62,6 +62,8 @@ struct Uniforms {
   rescaleSlope: f32,
   bricksPerAxis: vec3<f32>,
   rescaleIntercept: f32,
+  cellsPerAxis: vec3<f32>,
+  cellSize: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
@@ -113,6 +115,7 @@ const SEG_ENABLED = ${segEnabled};
 @group(0) @binding(3) var<storage, read> labels: array<vec4<f32>>;
 @group(0) @binding(4) var brickRange: texture_3d<f32>;
 @group(0) @binding(5) var segPageTable: texture_3d<i32>;
+@group(0) @binding(6) var cellRange: texture_3d<${texelType}>;
 ${VOLUME_FETCH}
 fn slotsAt(q: vec3<f32>) -> vec4<u32> {
   let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
@@ -130,6 +133,38 @@ fn slotsAt(q: vec3<f32>) -> vec4<u32> {
 fn brickCoord(q: vec3<f32>) -> vec3<i32> {
   let grid = vec3<i32>(U.bricksPerAxis) - vec3<i32>(1);
   return clamp(vec3<i32>(floor(q / U.brickSize)), vec3<i32>(0), grid);
+}
+
+fn cellCoord(q: vec3<f32>) -> vec3<i32> {
+  let grid = vec3<i32>(U.cellsPerAxis) - vec3<i32>(1);
+  return clamp(vec3<i32>(floor(q / U.cellSize)), vec3<i32>(0), grid);
+}
+
+fn cellRangeAt(cc: vec3<i32>) -> vec2<f32> {
+  let raw = vec2<f32>(textureLoad(cellRange, cc, 0).xy) * U.rescaleSlope + U.rescaleIntercept;
+  return vec2<f32>(min(raw.x, raw.y), max(raw.x, raw.y));
+}
+
+fn gateClosed(rangeMin: f32, rangeMax: f32, maxValue: f32, minValue: f32, windowLow: f32) -> bool {
+  if (BLEND_MODE == 0u) {
+    return rangeMax <= maxValue;
+  }
+  if (BLEND_MODE == 1u) {
+    return rangeMin >= minValue;
+  }
+  if (BLEND_MODE == 3u) {
+    return rangeMax <= windowLow;
+  }
+  return false;
+}
+
+fn leapExitIndex(lo: vec3<f32>, size: f32, qStart: vec3<f32>, qStep: vec3<f32>) -> u32 {
+  let moving = abs(qStep) > vec3<f32>(1e-6);
+  let exitFace = select(lo, lo + vec3<f32>(size), qStep > vec3<f32>(0.0));
+  let safeStep = select(vec3<f32>(1.0), qStep, moving);
+  let tAxis = select(vec3<f32>(1.0e30), (exitFace - qStart) / safeStep, moving);
+  let tExit = min(min(tAxis.x, tAxis.y), tAxis.z);
+  return u32(max(ceil(tExit) - 1.0, 0.0));
 }
 
 fn applyWindow(value: f32) -> f32 {
@@ -220,6 +255,8 @@ fn fs(in: VertexOut) -> FragOut {
   var brickMin = 0.0;
   var brickMax = 0.0;
   var segOccupied = 0.0;
+  var lastCell = vec3<i32>(-2);
+  var cell = vec2<f32>(0.0);
   var debugAlpha = 0.0;
   let walkEverything = DEBUG_VIEW == 1u;
 
@@ -239,27 +276,24 @@ fn fs(in: VertexOut) -> FragOut {
       lastBrick = bc;
     }
 
-    var imageSkip = !brickResident || imageDone;
+    var imageSkip = !brickResident || imageDone
+      || gateClosed(brickMin, brickMax, maxValue, minValue, windowLow);
+    var leapLo = vec3<f32>(bc) * U.brickSize;
+    var leapSize = U.brickSize;
     if (!imageSkip) {
-      if (BLEND_MODE == 0u) {
-        imageSkip = brickMax <= maxValue;
-      } else if (BLEND_MODE == 1u) {
-        imageSkip = brickMin >= minValue;
-      } else if (BLEND_MODE == 3u) {
-        imageSkip = brickMax <= windowLow;
+      let cc = cellCoord(q);
+      if (any(cc != lastCell)) {
+        cell = cellRangeAt(cc);
+        lastCell = cc;
       }
+      imageSkip = gateClosed(cell.x, cell.y, maxValue, minValue, windowLow);
+      leapLo = vec3<f32>(cc) * U.cellSize;
+      leapSize = U.cellSize;
     }
     let segNeeded = SEG_ENABLED && segOccupied > 0.5 && seenCount < 8u;
 
     if (count > 1u && imageSkip && !segNeeded && !walkEverything) {
-      let brickLo = vec3<f32>(bc) * U.brickSize;
-      let moving = abs(qStep) > vec3<f32>(1e-6);
-      let exitFace = select(brickLo, brickLo + vec3<f32>(U.brickSize), qStep > vec3<f32>(0.0));
-      let safeStep = select(vec3<f32>(1.0), qStep, moving);
-      let tAxis = select(vec3<f32>(1.0e30), (exitFace - qStart) / safeStep, moving);
-      let tExit = min(min(tAxis.x, tAxis.y), tAxis.z);
-      let exitIndex = u32(max(ceil(tExit) - 1.0, 0.0));
-      i = max(exitIndex, i + 1u) - 1u;
+      i = max(leapExitIndex(leapLo, leapSize, qStart, qStep), i + 1u) - 1u;
       continue;
     }
 
