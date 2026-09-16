@@ -1,4 +1,5 @@
 import { bytesPerVoxel } from '../brick-store';
+import type { BlendMode } from '../blend';
 import type { VolumeFormat } from '../geometry';
 import { dot } from '../math';
 import type { Viewport } from '../viewport';
@@ -39,9 +40,9 @@ interface VolumeResource {
   labelVersion: number;
 }
 
-interface PipelineSet {
+interface ShaderSet {
+  module: GPUShaderModule;
   layout: GPUBindGroupLayout;
-  pipeline: GPURenderPipeline;
 }
 
 interface ViewportResource {
@@ -64,7 +65,8 @@ export class GPURenderer implements Renderer {
   private emptySegTexture!: GPUTexture;
   private emptySegView!: GPUTextureView;
 
-  private readonly pipelines = new Map<TexelType, PipelineSet>();
+  private readonly shaders = new Map<TexelType, ShaderSet>();
+  private readonly pipelines = new Map<string, GPURenderPipeline>();
   private readonly volumes = new Map<string, VolumeResource>();
   private readonly viewports = new Map<string, ViewportResource>();
 
@@ -133,9 +135,9 @@ export class GPURenderer implements Renderer {
     });
   }
 
-  private pipelineFor(format: VolumeFormat): PipelineSet {
+  private shaderFor(format: VolumeFormat): ShaderSet {
     const texelType = poolTexelType(format);
-    const existing = this.pipelines.get(texelType);
+    const existing = this.shaders.get(texelType);
     if (existing) return existing;
     const module = this.device.createShaderModule({ code: raycastShader(texelType) });
     const layout = this.device.createBindGroupLayout({
@@ -172,19 +174,38 @@ export class GPURenderer implements Renderer {
         },
       ],
     });
+    const set = { module, layout };
+    this.shaders.set(texelType, set);
+    return set;
+  }
+
+  private pipelineFor(
+    format: VolumeFormat,
+    blendMode: BlendMode,
+    segEnabled: boolean,
+    debugEmptyBlocks: boolean,
+  ): GPURenderPipeline {
+    const key = `${poolTexelType(format)}:${blendMode}:${segEnabled}:${debugEmptyBlocks}`;
+    const existing = this.pipelines.get(key);
+    if (existing) return existing;
+    const { module, layout } = this.shaderFor(format);
     const pipeline = this.device.createRenderPipeline({
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
       vertex: { module, entryPoint: 'vs' },
       fragment: {
         module,
         entryPoint: 'fs',
+        constants: {
+          BLEND_MODE: blendMode,
+          SEG_ENABLED: segEnabled ? 1 : 0,
+          DEBUG_EMPTY: debugEmptyBlocks ? 1 : 0,
+        },
         targets: [{ format: this.format }, { format: 'rgba32uint' }],
       },
       primitive: { topology: 'triangle-list' },
     });
-    const set = { layout, pipeline };
-    this.pipelines.set(texelType, set);
-    return set;
+    this.pipelines.set(key, pipeline);
+    return pipeline;
   }
 
   onVolumeCreated(volume: Volume): void {
@@ -458,7 +479,7 @@ export class GPURenderer implements Renderer {
         resource.bindGroupSegView !== segView
       ) {
         resource.bindGroup = this.device.createBindGroup({
-          layout: this.pipelineFor(volumeResource.format).layout,
+          layout: this.shaderFor(volumeResource.format).layout,
           entries: [
             { binding: 0, resource: { buffer: resource.uniformBuffer } },
             { binding: 1, resource: volumeResource.poolView },
@@ -482,9 +503,7 @@ export class GPURenderer implements Renderer {
       writeUniforms(
         resource.uniformData,
         viewport,
-        segEnabled,
         viewport.segmentationAntialiasing,
-        viewport.debugEmptyBlocks,
         volumeResource.poolSlotsPerAxis,
       );
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
@@ -525,7 +544,14 @@ export class GPURenderer implements Renderer {
           },
         ],
       });
-      pass.setPipeline(this.pipelineFor(volumeResource.format).pipeline);
+      pass.setPipeline(
+        this.pipelineFor(
+          volumeResource.format,
+          viewport.blendMode,
+          segEnabled,
+          viewport.debugEmptyBlocks,
+        ),
+      );
       pass.setBindGroup(0, resource.bindGroup);
       pass.draw(3);
       pass.end();
@@ -612,9 +638,7 @@ function brickNeighborhood(grid: readonly [number, number, number], index: numbe
 function writeUniforms(
   arr: Float32Array,
   viewport: Viewport,
-  segEnabled: boolean,
   segAntialias: boolean,
-  debugEmptyBlocks: boolean,
   poolSlotsPerAxis: number,
 ): void {
   const camera = viewport.camera;
@@ -659,18 +683,10 @@ function writeUniforms(
   arr[24] = direction[2][0];
   arr[25] = direction[2][1];
   arr[26] = direction[2][2];
-  arr[27] = viewport.blendMode;
+  arr[27] = segAntialias ? 1 : 0;
   arr[28] = origin[0];
   arr[29] = origin[1];
   arr[30] = origin[2];
-  arr[31] = segEnabled ? 1 : 0;
-  arr[32] = spacing[0];
-  arr[33] = spacing[1];
-  arr[34] = spacing[2];
-  arr[35] = segAntialias ? 1 : 0;
-  arr[36] = dims[0];
-  arr[37] = dims[1];
-  arr[38] = dims[2];
 
   const voxelsPerWorld = Math.hypot(
     dot(right, direction[0]) / spacing[0],
@@ -678,15 +694,20 @@ function writeUniforms(
     dot(right, direction[2]) / spacing[2],
   );
   const worldPerPixel = (2 * halfHeight) / viewport.canvas.height;
-  arr[39] = worldPerPixel * voxelsPerWorld;
+  arr[31] = worldPerPixel * voxelsPerWorld;
 
   const store = viewport.volume.store;
+  arr[32] = spacing[0];
+  arr[33] = spacing[1];
+  arr[34] = spacing[2];
+  arr[35] = store.brickSize;
+  arr[36] = dims[0];
+  arr[37] = dims[1];
+  arr[38] = dims[2];
+  arr[39] = viewport.volume.rescale.slope;
   arr[40] = store.bricksPerAxis[0];
   arr[41] = store.bricksPerAxis[1];
   arr[42] = store.bricksPerAxis[2];
-  arr[43] = store.brickSize;
-  arr[44] = debugEmptyBlocks ? 1 : 0;
-  arr[45] = viewport.volume.rescale.slope;
-  arr[46] = viewport.volume.rescale.intercept;
-  arr[47] = poolSlotsPerAxis;
+  arr[43] = viewport.volume.rescale.intercept;
+  arr[44] = poolSlotsPerAxis;
 }

@@ -61,17 +61,14 @@ struct Uniforms {
   dirCol1: vec3<f32>,
   windowWidth: f32,
   dirCol2: vec3<f32>,
-  blendMode: f32,
-  origin: vec3<f32>,
-  segEnabled: f32,
-  spacing: vec3<f32>,
   segAntialias: f32,
-  dims: vec3<f32>,
+  origin: vec3<f32>,
   pixelVoxels: f32,
-  bricksPerAxis: vec3<f32>,
+  spacing: vec3<f32>,
   brickSize: f32,
-  debugEmptyBlocks: f32,
+  dims: vec3<f32>,
   rescaleSlope: f32,
+  bricksPerAxis: vec3<f32>,
   rescaleIntercept: f32,
   poolSlotsPerAxis: f32,
 };
@@ -117,6 +114,9 @@ fn worldDirToIndex(v: vec3<f32>) -> vec3<f32> {
 export function raycastShader(texelType: TexelType): string {
   return /* wgsl */ `
 ${SHARED}
+override BLEND_MODE: u32;
+override SEG_ENABLED: bool;
+override DEBUG_EMPTY: bool;
 @group(0) @binding(1) var volume: texture_3d<${texelType}>;
 @group(0) @binding(2) var segmentation: texture_3d<u32>;
 @group(0) @binding(3) var<storage, read> labels: array<vec4<f32>>;
@@ -134,10 +134,6 @@ fn slotsAt(q: vec3<f32>) -> vec4<u32> {
   }
   let coord = slotCoord(slotEntry - 1, ${SEG_SLOTS_PER_AXIS}) * brickSize + c - bc * brickSize;
   return textureLoad(segmentation, coord, 0);
-}
-
-fn inBounds(q: vec3<f32>) -> bool {
-  return all(q >= vec3<f32>(0.0)) && all(q <= (U.dims - vec3<f32>(1.0)));
 }
 
 fn brickCoord(q: vec3<f32>) -> vec3<i32> {
@@ -184,29 +180,28 @@ fn fs(in: VertexOut) -> FragOut {
 
   let plane = U.focalPoint + U.right * (in.uv.x * U.halfWidth) + U.trueUp * (in.uv.y * U.halfHeight);
   let count = max(u32(U.sampleCount), 1u);
-  let qStart = worldToIndex(plane - U.normal * (U.slabThickness * 0.5));
-  let qDir = worldDirToIndex(U.normal) * U.slabThickness;
-
-  var iLo = 0u;
-  var iHi = count - 1u;
+  let lastIndex = f32(count - 1u);
+  var qStart = worldToIndex(plane);
+  var qStep = vec3<f32>(0.0);
   if (count > 1u) {
-    var t = vec2<f32>(0.0, 1.0);
-    t = clipAxis(qStart.x, qDir.x, U.dims.x - 1.0, t);
-    t = clipAxis(qStart.y, qDir.y, U.dims.y - 1.0, t);
-    t = clipAxis(qStart.z, qDir.z, U.dims.z - 1.0, t);
-    if (t.x > t.y) {
-      return out;
-    }
-    let scale = f32(count - 1u);
-    iLo = u32(max(ceil(t.x * scale) - 1.0, 0.0));
-    iHi = u32(min(floor(t.y * scale) + 1.0, scale));
+    qStart = worldToIndex(plane - U.normal * (U.slabThickness * 0.5));
+    qStep = worldDirToIndex(U.normal) * (U.slabThickness / lastIndex);
   }
 
-  let mode = u32(U.blendMode);
+  var t = vec2<f32>(0.0, lastIndex);
+  t = clipAxis(qStart.x, qStep.x, U.dims.x - 1.0, t);
+  t = clipAxis(qStart.y, qStep.y, U.dims.y - 1.0, t);
+  t = clipAxis(qStart.z, qStep.z, U.dims.z - 1.0, t);
+  if (t.x > t.y) {
+    return out;
+  }
+  let iLo = u32(ceil(t.x - 1e-4));
+  let iHi = u32(floor(t.y + 1e-4));
+
   var maxValue = -3.0e38;
   var minValue = 3.0e38;
   var sum = 0.0;
-  var inBoundsCount = 0.0;
+  var visited = 0.0;
   var compositeColor = 0.0;
   var compositeAlpha = 0.0;
   var seen: array<u32, 8>;
@@ -219,19 +214,11 @@ fn fs(in: VertexOut) -> FragOut {
   var debugAlpha = 0.0;
 
   for (var i = iLo; i <= iHi; i = i + 1u) {
-    if (mode == 3u && U.debugEmptyBlocks < 0.5 && compositeAlpha > 0.995
-      && (U.segEnabled < 0.5 || seenCount >= 8u)) {
+    if (BLEND_MODE == 3u && !DEBUG_EMPTY && compositeAlpha > 0.995
+      && (!SEG_ENABLED || seenCount >= 8u)) {
       break;
     }
-    var frac = 0.5;
-    if (count > 1u) {
-      frac = f32(i) / f32(count - 1u);
-    }
-    let q = qStart + qDir * frac;
-    if (!inBounds(q)) {
-      continue;
-    }
-    inBoundsCount = inBoundsCount + 1.0;
+    let q = qStart + qStep * f32(i);
 
     let bc = brickCoord(q);
     if (any(bc != lastBrick)) {
@@ -245,38 +232,38 @@ fn fs(in: VertexOut) -> FragOut {
 
     var imageSkip = !brickResident;
     if (brickResident) {
-      if (mode == 0u) {
+      if (BLEND_MODE == 0u) {
         imageSkip = brickMax <= maxValue;
-      } else if (mode == 1u) {
+      } else if (BLEND_MODE == 1u) {
         imageSkip = brickMin >= minValue;
-      } else if (mode == 3u) {
+      } else if (BLEND_MODE == 3u) {
         imageSkip = applyWindow(brickMax) <= 0.0 || compositeAlpha > 0.995;
       }
     }
-    let segNeeded = U.segEnabled > 0.5 && segOccupied > 0.5 && seenCount < 8u;
+    let segNeeded = SEG_ENABLED && segOccupied > 0.5 && seenCount < 8u;
 
-    if (count > 1u && imageSkip && !segNeeded && U.debugEmptyBlocks < 0.5) {
+    if (count > 1u && imageSkip && !segNeeded && !DEBUG_EMPTY) {
       let brickLo = vec3<f32>(bc) * U.brickSize;
-      let moving = abs(qDir) > vec3<f32>(1e-6);
-      let exitFace = select(brickLo, brickLo + vec3<f32>(U.brickSize), qDir > vec3<f32>(0.0));
-      let safeDir = select(vec3<f32>(1.0), qDir, moving);
-      let tAxis = select(vec3<f32>(2.0), (exitFace - qStart) / safeDir, moving);
+      let moving = abs(qStep) > vec3<f32>(1e-6);
+      let exitFace = select(brickLo, brickLo + vec3<f32>(U.brickSize), qStep > vec3<f32>(0.0));
+      let safeStep = select(vec3<f32>(1.0), qStep, moving);
+      let tAxis = select(vec3<f32>(1.0e30), (exitFace - qStart) / safeStep, moving);
       let tExit = min(min(tAxis.x, tAxis.y), tAxis.z);
-      let exitIndex = u32(max(ceil(tExit * f32(count - 1u)) - 1.0, 0.0));
+      let exitIndex = u32(max(ceil(tExit) - 1.0, 0.0));
       i = max(exitIndex, i + 1u) - 1u;
       continue;
     }
 
-    if (U.debugEmptyBlocks > 0.5 && applyWindow(brickMax) <= 0.0) {
+    if (DEBUG_EMPTY && applyWindow(brickMax) <= 0.0) {
       let local = q - vec3<f32>(bc) * U.brickSize;
       let toFace = min(local, vec3<f32>(U.brickSize) - local);
-      let t = clamp(U.pixelVoxels, 0.5, U.brickSize * 0.25);
+      let band = clamp(U.pixelVoxels, 0.5, U.brickSize * 0.25);
       var nearFaces = 0;
-      if (toFace.x < t) { nearFaces = nearFaces + 1; }
-      if (toFace.y < t) { nearFaces = nearFaces + 1; }
-      if (toFace.z < t) { nearFaces = nearFaces + 1; }
+      if (toFace.x < band) { nearFaces = nearFaces + 1; }
+      if (toFace.y < band) { nearFaces = nearFaces + 1; }
+      if (toFace.z < band) { nearFaces = nearFaces + 1; }
       if (nearFaces >= 2) {
-        debugAlpha = debugAlpha + (1.0 - debugAlpha);
+        debugAlpha = 1.0;
       }
     }
 
@@ -308,22 +295,19 @@ fn fs(in: VertexOut) -> FragOut {
     maxValue = max(maxValue, value);
     minValue = min(minValue, value);
     sum = sum + value;
+    visited = visited + 1.0;
     let gray = applyWindow(value);
     compositeColor = compositeColor + (1.0 - compositeAlpha) * gray * gray;
     compositeAlpha = compositeAlpha + (1.0 - compositeAlpha) * gray;
   }
 
-  if (inBoundsCount == 0.0) {
-    return out;
-  }
-
   var gray = 0.0;
-  if (mode == 0u) {
+  if (BLEND_MODE == 0u) {
     gray = applyWindow(maxValue);
-  } else if (mode == 1u) {
+  } else if (BLEND_MODE == 1u) {
     gray = applyWindow(minValue);
-  } else if (mode == 2u) {
-    gray = applyWindow(sum / inBoundsCount);
+  } else if (BLEND_MODE == 2u) {
+    gray = applyWindow(sum / max(visited, 1.0));
   } else {
     gray = compositeColor;
   }
