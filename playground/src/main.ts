@@ -1,6 +1,7 @@
 import {
   applyRescale,
   BlendMode,
+  DebugView,
   indexToWorld,
   initRenderingEngine,
   type Orientation,
@@ -21,7 +22,7 @@ const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
 const sphere50Button = document.querySelector<HTMLButtonElement>('#sphere-50')!;
 const sphere1000Button = document.querySelector<HTMLButtonElement>('#sphere-1000')!;
 const antialiasButton = document.querySelector<HTMLButtonElement>('#antialiasing')!;
-const debugBlocksButton = document.querySelector<HTMLButtonElement>('#debug-blocks')!;
+const debugViewButton = document.querySelector<HTMLButtonElement>('#debug-view')!;
 
 const KEBAB_RAD_PER_SEC = (2 * Math.PI) / 24;
 
@@ -32,6 +33,11 @@ const PANELS: { id: string; orientation: Orientation }[] = [
 ];
 
 const BLEND_NAMES = ['MIP', 'MinIP', 'Average', 'Composite'];
+const DEBUG_VIEWS: { view: DebugView; name: string }[] = [
+  { view: DebugView.None, name: 'off' },
+  { view: DebugView.EmptyBlocks, name: 'empty blocks' },
+  { view: DebugView.FetchHeatmap, name: 'fetch heatmap' },
+];
 
 interface ActiveViewport {
   viewport: Viewport;
@@ -43,7 +49,7 @@ interface ActiveViewport {
 let activeViewports: ActiveViewport[] = [];
 let activeVolume: Volume | null = null;
 let antialiasEnabled = true;
-let debugBlocksEnabled = false;
+let debugViewIndex = 0;
 let blendMode: BlendMode = BlendMode.MIP;
 
 let kebabEnabled = false;
@@ -389,7 +395,7 @@ async function open(files: File[]): Promise<void> {
     viewport.setWindowLevel({ center: series.windowCenter, width: series.windowWidth });
     viewport.setBlendMode(blendMode);
     viewport.setSegmentationAntialiasing(antialiasEnabled);
-    viewport.setDebugEmptyBlocks(debugBlocksEnabled);
+    viewport.setDebugView(DEBUG_VIEWS[debugViewIndex]!.view);
     activeViewports.push({
       viewport,
       orientation: panel.orientation,
@@ -463,12 +469,23 @@ function setAntialiasing(enabled: boolean): void {
   for (const { viewport } of activeViewports) viewport.setSegmentationAntialiasing(enabled);
 }
 
-function setDebugBlocks(enabled: boolean): void {
-  debugBlocksEnabled = enabled;
-  debugBlocksButton.textContent = `Empty blocks: ${enabled ? 'on' : 'off'}`;
-  debugBlocksButton.classList.toggle('text-stone-50', enabled);
-  debugBlocksButton.classList.toggle('text-stone-400', !enabled);
-  for (const { viewport } of activeViewports) viewport.setDebugEmptyBlocks(enabled);
+function cycleDebugView(): void {
+  debugViewIndex = (debugViewIndex + 1) % DEBUG_VIEWS.length;
+  const { view, name } = DEBUG_VIEWS[debugViewIndex]!;
+  debugViewButton.textContent = `Debug: ${name}`;
+  debugViewButton.classList.toggle('text-stone-50', view !== DebugView.None);
+  debugViewButton.classList.toggle('text-stone-400', view === DebugView.None);
+  for (const { viewport } of activeViewports) viewport.setDebugView(view);
+}
+
+function renderTimeFrame(): void {
+  for (const { viewport } of activeViewports) {
+    const label = document.querySelector<HTMLSpanElement>(`#${viewport.id}-time`);
+    if (!label) continue;
+    const ms = viewport.renderTimeMs;
+    label.textContent = ms === null ? '' : `${ms.toFixed(2)} ms`;
+  }
+  requestAnimationFrame(renderTimeFrame);
 }
 
 function filesFrom(input: HTMLInputElement): File[] {
@@ -481,4 +498,5 @@ resetButton.addEventListener('click', resetOrientation);
 sphere50Button.addEventListener('click', () => void addSphereSegments(50));
 sphere1000Button.addEventListener('click', () => void addSphereSegments(1000));
 antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnabled));
-debugBlocksButton.addEventListener('click', () => setDebugBlocks(!debugBlocksEnabled));
+debugViewButton.addEventListener('click', cycleDebugView);
+requestAnimationFrame(renderTimeFrame);

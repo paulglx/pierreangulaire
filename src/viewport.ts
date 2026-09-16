@@ -4,6 +4,9 @@ import { worldToIndex } from './geometry';
 import type { Vec3 } from './math';
 import type { Volume } from './volume';
 
+export const DebugView = { None: 0, EmptyBlocks: 1, FetchHeatmap: 2 } as const;
+export type DebugView = (typeof DebugView)[keyof typeof DebugView];
+
 export class Viewport {
   readonly id: string;
   readonly canvas: HTMLCanvasElement;
@@ -15,7 +18,8 @@ export class Viewport {
   slabThickness: number;
   segmentationVisible = true;
   segmentationAntialiasing = true;
-  debugEmptyBlocks = false;
+  debugView: DebugView = DebugView.None;
+  renderTimeMs: number | null = null;
   dirty = true;
 
   constructor(id: string, canvas: HTMLCanvasElement, volume: Volume, camera: Camera) {
@@ -57,8 +61,8 @@ export class Viewport {
     this.dirty = true;
   }
 
-  setDebugEmptyBlocks(enabled: boolean): void {
-    this.debugEmptyBlocks = enabled;
+  setDebugView(view: DebugView): void {
+    this.debugView = view;
     this.dirty = true;
   }
 

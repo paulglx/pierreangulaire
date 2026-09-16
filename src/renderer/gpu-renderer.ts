@@ -2,7 +2,7 @@ import { bytesPerVoxel } from '../brick-store';
 import type { BlendMode } from '../blend';
 import type { VolumeFormat } from '../geometry';
 import { dot } from '../math';
-import type { Viewport } from '../viewport';
+import type { DebugView, Viewport } from '../viewport';
 import { applyRescale, type Volume } from '../volume';
 import {
   poolSampleType,
@@ -16,6 +16,7 @@ import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 48;
 const RANGE_FLOATS = 4;
+const TIMESTAMP_BYTES = 16;
 const SEG_SLOTS_PER_LAYER = SEG_SLOTS_PER_AXIS * SEG_SLOTS_PER_AXIS;
 
 interface VolumeResource {
@@ -36,11 +37,6 @@ interface VolumeResource {
   labelVersion: number;
 }
 
-interface ShaderSet {
-  module: GPUShaderModule;
-  layout: GPUBindGroupLayout;
-}
-
 interface ViewportResource {
   context: GPUCanvasContext;
   uniformBuffer: GPUBuffer;
@@ -51,6 +47,14 @@ interface ViewportResource {
   segTarget: { texture: GPUTexture; view: GPUTextureView } | null;
   resolveBindGroup: GPUBindGroup | null;
   resolveBindGroupVolumeId: string | null;
+  timing: FrameTiming | null;
+}
+
+interface FrameTiming {
+  querySet: GPUQuerySet;
+  resolveBuffer: GPUBuffer;
+  readBuffer: GPUBuffer;
+  pending: boolean;
 }
 
 export class GPURenderer implements Renderer {
@@ -61,7 +65,10 @@ export class GPURenderer implements Renderer {
   private emptySegTexture!: GPUTexture;
   private emptySegView!: GPUTextureView;
 
-  private readonly shaders = new Map<TexelType, ShaderSet>();
+  private timestampsSupported = false;
+
+  private readonly layouts = new Map<TexelType, GPUBindGroupLayout>();
+  private readonly modules = new Map<string, GPUShaderModule>();
   private readonly pipelines = new Map<string, GPURenderPipeline>();
   private readonly volumes = new Map<string, VolumeResource>();
   private readonly viewports = new Map<string, ViewportResource>();
@@ -74,7 +81,9 @@ export class GPURenderer implements Renderer {
     if (!adapter) {
       throw new Error('No WebGPU adapter found.');
     }
+    this.timestampsSupported = adapter.features.has('timestamp-query');
     this.device = await adapter.requestDevice({
+      requiredFeatures: this.timestampsSupported ? ['timestamp-query'] : [],
       requiredLimits: {
         maxBufferSize: adapter.limits.maxBufferSize,
         maxTextureDimension3D: adapter.limits.maxTextureDimension3D,
@@ -131,11 +140,10 @@ export class GPURenderer implements Renderer {
     });
   }
 
-  private shaderFor(format: VolumeFormat): ShaderSet {
+  private layoutFor(format: VolumeFormat): GPUBindGroupLayout {
     const texelType = poolTexelType(format);
-    const existing = this.shaders.get(texelType);
+    const existing = this.layouts.get(texelType);
     if (existing) return existing;
-    const module = this.device.createShaderModule({ code: raycastShader(texelType) });
     const layout = this.device.createBindGroupLayout({
       entries: [
         {
@@ -170,33 +178,40 @@ export class GPURenderer implements Renderer {
         },
       ],
     });
-    const set = { module, layout };
-    this.shaders.set(texelType, set);
-    return set;
+    this.layouts.set(texelType, layout);
+    return layout;
+  }
+
+  private moduleFor(format: VolumeFormat, segEnabled: boolean): GPUShaderModule {
+    const texelType = poolTexelType(format);
+    const key = `${texelType}:${segEnabled}`;
+    const existing = this.modules.get(key);
+    if (existing) return existing;
+    const module = this.device.createShaderModule({ code: raycastShader(texelType, segEnabled) });
+    this.modules.set(key, module);
+    return module;
   }
 
   private pipelineFor(
     format: VolumeFormat,
     blendMode: BlendMode,
     segEnabled: boolean,
-    debugEmptyBlocks: boolean,
+    debugView: DebugView,
   ): GPURenderPipeline {
-    const key = `${poolTexelType(format)}:${blendMode}:${segEnabled}:${debugEmptyBlocks}`;
+    const key = `${poolTexelType(format)}:${blendMode}:${segEnabled}:${debugView}`;
     const existing = this.pipelines.get(key);
     if (existing) return existing;
-    const { module, layout } = this.shaderFor(format);
+    const module = this.moduleFor(format, segEnabled);
+    const targets: GPUColorTargetState[] = [{ format: this.format }];
+    if (segEnabled) targets.push({ format: 'rgba32uint' });
     const pipeline = this.device.createRenderPipeline({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layoutFor(format)] }),
       vertex: { module, entryPoint: 'vs' },
       fragment: {
         module,
         entryPoint: 'fs',
-        constants: {
-          BLEND_MODE: blendMode,
-          SEG_ENABLED: segEnabled ? 1 : 0,
-          DEBUG_EMPTY: debugEmptyBlocks ? 1 : 0,
-        },
-        targets: [{ format: this.format }, { format: 'rgba32uint' }],
+        constants: { BLEND_MODE: blendMode, DEBUG_VIEW: debugView },
+        targets,
       },
       primitive: { topology: 'triangle-list' },
     });
@@ -438,7 +453,23 @@ export class GPURenderer implements Renderer {
       segTarget: null,
       resolveBindGroup: null,
       resolveBindGroupVolumeId: null,
+      timing: this.timestampsSupported ? this.createFrameTiming() : null,
     });
+  }
+
+  private createFrameTiming(): FrameTiming {
+    return {
+      querySet: this.device.createQuerySet({ type: 'timestamp', count: 2 }),
+      resolveBuffer: this.device.createBuffer({
+        size: TIMESTAMP_BYTES,
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      }),
+      readBuffer: this.device.createBuffer({
+        size: TIMESTAMP_BYTES,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      }),
+      pending: false,
+    };
   }
 
   resizeViewport(_viewport: Viewport): void {}
@@ -449,12 +480,18 @@ export class GPURenderer implements Renderer {
     resource.context.unconfigure();
     resource.uniformBuffer.destroy();
     resource.segTarget?.texture.destroy();
+    if (resource.timing) {
+      resource.timing.querySet.destroy();
+      resource.timing.resolveBuffer.destroy();
+      resource.timing.readBuffer.destroy();
+    }
     this.viewports.delete(id);
   }
 
   render(viewports: readonly Viewport[]): void {
     const encoder = this.device.createCommandEncoder();
     let submitted = false;
+    const timed: { viewport: Viewport; timing: FrameTiming }[] = [];
     for (const viewport of viewports) {
       const resource = this.viewports.get(viewport.id);
       const volumeResource = this.volumes.get(viewport.volume.id);
@@ -467,7 +504,7 @@ export class GPURenderer implements Renderer {
         resource.bindGroupSegView !== segView
       ) {
         resource.bindGroup = this.device.createBindGroup({
-          layout: this.shaderFor(volumeResource.format).layout,
+          layout: this.layoutFor(volumeResource.format),
           entries: [
             { binding: 0, resource: { buffer: resource.uniformBuffer } },
             { binding: 1, resource: volumeResource.poolView },
@@ -492,54 +529,60 @@ export class GPURenderer implements Renderer {
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
 
       const canvasTexture = resource.context.getCurrentTexture();
+      const canvasView = canvasTexture.createView();
+      const colorAttachments: GPURenderPassColorAttachment[] = [
+        {
+          view: canvasView,
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+      ];
       let segTarget = resource.segTarget;
-      if (
-        segTarget === null ||
-        segTarget.texture.width !== canvasTexture.width ||
-        segTarget.texture.height !== canvasTexture.height
-      ) {
-        segTarget?.texture.destroy();
-        const texture = this.device.createTexture({
-          size: { width: canvasTexture.width, height: canvasTexture.height },
-          format: 'rgba32uint',
-          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      if (segEnabled) {
+        if (
+          segTarget === null ||
+          segTarget.texture.width !== canvasTexture.width ||
+          segTarget.texture.height !== canvasTexture.height
+        ) {
+          segTarget?.texture.destroy();
+          const texture = this.device.createTexture({
+            size: { width: canvasTexture.width, height: canvasTexture.height },
+            format: 'rgba32uint',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+          });
+          segTarget = { texture, view: texture.createView() };
+          resource.segTarget = segTarget;
+          resource.resolveBindGroup = null;
+          resource.resolveBindGroupVolumeId = null;
+        }
+        colorAttachments.push({
+          view: segTarget.view,
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear',
+          storeOp: 'store',
         });
-        segTarget = { texture, view: texture.createView() };
-        resource.segTarget = segTarget;
-        resource.resolveBindGroup = null;
-        resource.resolveBindGroupVolumeId = null;
       }
 
-      const canvasView = canvasTexture.createView();
+      const timing = resource.timing !== null && !resource.timing.pending ? resource.timing : null;
       const pass = encoder.beginRenderPass({
-        colorAttachments: [
-          {
-            view: canvasView,
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            loadOp: 'clear',
-            storeOp: 'store',
-          },
-          {
-            view: segTarget.view,
-            clearValue: { r: 0, g: 0, b: 0, a: 0 },
-            loadOp: 'clear',
-            storeOp: segEnabled ? 'store' : 'discard',
-          },
-        ],
+        colorAttachments,
+        timestampWrites: timing
+          ? {
+              querySet: timing.querySet,
+              beginningOfPassWriteIndex: 0,
+              endOfPassWriteIndex: segEnabled ? undefined : 1,
+            }
+          : undefined,
       });
       pass.setPipeline(
-        this.pipelineFor(
-          volumeResource.format,
-          viewport.blendMode,
-          segEnabled,
-          viewport.debugEmptyBlocks,
-        ),
+        this.pipelineFor(volumeResource.format, viewport.blendMode, segEnabled, viewport.debugView),
       );
       pass.setBindGroup(0, resource.bindGroup);
       pass.draw(3);
       pass.end();
 
-      if (segEnabled) {
+      if (segEnabled && segTarget) {
         if (
           resource.resolveBindGroup === null ||
           resource.resolveBindGroupVolumeId !== viewport.volume.id
@@ -556,17 +599,27 @@ export class GPURenderer implements Renderer {
         }
         const resolvePass = encoder.beginRenderPass({
           colorAttachments: [{ view: canvasView, loadOp: 'load', storeOp: 'store' }],
+          timestampWrites: timing
+            ? { querySet: timing.querySet, endOfPassWriteIndex: 1 }
+            : undefined,
         });
         resolvePass.setPipeline(this.resolvePipeline);
         resolvePass.setBindGroup(0, resource.resolveBindGroup);
         resolvePass.draw(3);
         resolvePass.end();
       }
+      if (timing) {
+        encoder.resolveQuerySet(timing.querySet, 0, 2, timing.resolveBuffer, 0);
+        encoder.copyBufferToBuffer(timing.resolveBuffer, 0, timing.readBuffer, 0, TIMESTAMP_BYTES);
+        timing.pending = true;
+        timed.push({ viewport, timing });
+      }
       submitted = true;
     }
     if (submitted) {
       this.device.queue.submit([encoder.finish()]);
     }
+    for (const entry of timed) void readFrameTiming(entry.viewport, entry.timing);
   }
 
   destroy(): void {
@@ -575,6 +628,19 @@ export class GPURenderer implements Renderer {
     this.volumes.clear();
     this.emptySegTexture.destroy();
     this.device.destroy();
+  }
+}
+
+async function readFrameTiming(viewport: Viewport, timing: FrameTiming): Promise<void> {
+  try {
+    await timing.readBuffer.mapAsync(GPUMapMode.READ);
+    const stamps = new BigUint64Array(timing.readBuffer.getMappedRange());
+    viewport.renderTimeMs = Number(stamps[1]! - stamps[0]!) / 1e6;
+    timing.readBuffer.unmap();
+  } catch {
+    return;
+  } finally {
+    timing.pending = false;
   }
 }
 

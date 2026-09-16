@@ -12,28 +12,29 @@ fn slotCoord(slot: i32, slotsPerAxis: i32) -> vec3<i32> {
 }
 
 fn loadVoxel(c: vec3<i32>) -> f32 {
-  let clamped = clamp(c, vec3<i32>(0), vec3<i32>(U.dims) - vec3<i32>(1));
-  return f32(textureLoad(volume, clamped, 0).x) * U.rescaleSlope + U.rescaleIntercept;
+  return f32(textureLoad(volume, c, 0).x);
 }
 
 fn sampleTrilinear(q: vec3<f32>) -> f32 {
-  let base = vec3<i32>(floor(q));
-  let f = q - floor(q);
-  let c000 = loadVoxel(base + vec3<i32>(0, 0, 0));
-  let c100 = loadVoxel(base + vec3<i32>(1, 0, 0));
-  let c010 = loadVoxel(base + vec3<i32>(0, 1, 0));
-  let c110 = loadVoxel(base + vec3<i32>(1, 1, 0));
-  let c001 = loadVoxel(base + vec3<i32>(0, 0, 1));
-  let c101 = loadVoxel(base + vec3<i32>(1, 0, 1));
-  let c011 = loadVoxel(base + vec3<i32>(0, 1, 1));
-  let c111 = loadVoxel(base + vec3<i32>(1, 1, 1));
+  let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
+  let base = clamp(vec3<i32>(floor(q)), vec3<i32>(0), max(maxIndex - vec3<i32>(1), vec3<i32>(0)));
+  let next = min(base + vec3<i32>(1), maxIndex);
+  let f = clamp(q - vec3<f32>(base), vec3<f32>(0.0), vec3<f32>(1.0));
+  let c000 = loadVoxel(vec3<i32>(base.x, base.y, base.z));
+  let c100 = loadVoxel(vec3<i32>(next.x, base.y, base.z));
+  let c010 = loadVoxel(vec3<i32>(base.x, next.y, base.z));
+  let c110 = loadVoxel(vec3<i32>(next.x, next.y, base.z));
+  let c001 = loadVoxel(vec3<i32>(base.x, base.y, next.z));
+  let c101 = loadVoxel(vec3<i32>(next.x, base.y, next.z));
+  let c011 = loadVoxel(vec3<i32>(base.x, next.y, next.z));
+  let c111 = loadVoxel(vec3<i32>(next.x, next.y, next.z));
   let x00 = mix(c000, c100, f.x);
   let x10 = mix(c010, c110, f.x);
   let x01 = mix(c001, c101, f.x);
   let x11 = mix(c011, c111, f.x);
   let y0 = mix(x00, x10, f.y);
   let y1 = mix(x01, x11, f.y);
-  return mix(y0, y1, f.z);
+  return mix(y0, y1, f.z) * U.rescaleSlope + U.rescaleIntercept;
 }
 `;
 
@@ -101,12 +102,12 @@ fn worldDirToIndex(v: vec3<f32>) -> vec3<f32> {
 }
 `;
 
-export function raycastShader(texelType: TexelType): string {
+export function raycastShader(texelType: TexelType, segEnabled: boolean): string {
   return /* wgsl */ `
 ${SHARED}
 override BLEND_MODE: u32;
-override SEG_ENABLED: bool;
-override DEBUG_EMPTY: bool;
+override DEBUG_VIEW: u32;
+const SEG_ENABLED = ${segEnabled};
 @group(0) @binding(1) var volume: texture_3d<${texelType}>;
 @group(0) @binding(2) var segmentation: texture_3d<u32>;
 @group(0) @binding(3) var<storage, read> labels: array<vec4<f32>>;
@@ -148,9 +149,24 @@ fn clipAxis(startC: f32, dirC: f32, hiC: f32, t: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(max(t.x, min(a, b)), min(t.y, max(a, b)));
 }
 
+fn heatColor(heat: f32) -> vec3<f32> {
+  let t = clamp(heat, 0.0, 1.0);
+  let blue = vec3<f32>(0.1, 0.2, 1.0);
+  let green = vec3<f32>(0.1, 0.9, 0.2);
+  let yellow = vec3<f32>(1.0, 0.9, 0.1);
+  let red = vec3<f32>(1.0, 0.1, 0.1);
+  if (t < 1.0 / 3.0) {
+    return mix(blue, green, t * 3.0);
+  }
+  if (t < 2.0 / 3.0) {
+    return mix(green, yellow, (t - 1.0 / 3.0) * 3.0);
+  }
+  return mix(yellow, red, (t - 2.0 / 3.0) * 3.0);
+}
+
 struct FragOut {
   @location(0) color: vec4<f32>,
-  @location(1) segments: vec4<u32>,
+${segEnabled ? '  @location(1) segments: vec4<u32>,' : ''}
 };
 
 fn packSegments(seen: array<u32, 8>) -> vec4<u32> {
@@ -166,7 +182,6 @@ fn packSegments(seen: array<u32, 8>) -> vec4<u32> {
 fn fs(in: VertexOut) -> FragOut {
   var out: FragOut;
   out.color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-  out.segments = vec4<u32>(0u);
 
   let plane = U.focalPoint + U.right * (in.uv.x * U.halfWidth) + U.trueUp * (in.uv.y * U.halfHeight);
   let count = max(u32(U.sampleCount), 1u);
@@ -188,12 +203,16 @@ fn fs(in: VertexOut) -> FragOut {
   let iLo = u32(ceil(t.x - 1e-4));
   let iHi = u32(floor(t.y + 1e-4));
 
-  var maxValue = -3.0e38;
-  var minValue = 3.0e38;
+  let windowLow = U.windowCenter - U.windowWidth * 0.5;
+  let windowHigh = windowLow + U.windowWidth;
+  var maxValue = windowLow;
+  var minValue = windowHigh;
   var sum = 0.0;
   var visited = 0.0;
   var compositeColor = 0.0;
   var compositeAlpha = 0.0;
+  var imageDone = false;
+  var fetched = 0u;
   var seen: array<u32, 8>;
   var seenCount = 0u;
   var lastBrick = vec3<i32>(-2);
@@ -202,10 +221,10 @@ fn fs(in: VertexOut) -> FragOut {
   var brickMax = 0.0;
   var segOccupied = 0.0;
   var debugAlpha = 0.0;
+  let walkEverything = DEBUG_VIEW == 1u;
 
   for (var i = iLo; i <= iHi; i = i + 1u) {
-    if (BLEND_MODE == 3u && !DEBUG_EMPTY && compositeAlpha > 0.995
-      && (!SEG_ENABLED || seenCount >= 8u)) {
+    if (imageDone && !walkEverything && (!SEG_ENABLED || seenCount >= 8u)) {
       break;
     }
     let q = qStart + qStep * f32(i);
@@ -220,19 +239,19 @@ fn fs(in: VertexOut) -> FragOut {
       lastBrick = bc;
     }
 
-    var imageSkip = !brickResident;
-    if (brickResident) {
+    var imageSkip = !brickResident || imageDone;
+    if (!imageSkip) {
       if (BLEND_MODE == 0u) {
         imageSkip = brickMax <= maxValue;
       } else if (BLEND_MODE == 1u) {
         imageSkip = brickMin >= minValue;
       } else if (BLEND_MODE == 3u) {
-        imageSkip = applyWindow(brickMax) <= 0.0 || compositeAlpha > 0.995;
+        imageSkip = brickMax <= windowLow;
       }
     }
     let segNeeded = SEG_ENABLED && segOccupied > 0.5 && seenCount < 8u;
 
-    if (count > 1u && imageSkip && !segNeeded && !DEBUG_EMPTY) {
+    if (count > 1u && imageSkip && !segNeeded && !walkEverything) {
       let brickLo = vec3<f32>(bc) * U.brickSize;
       let moving = abs(qStep) > vec3<f32>(1e-6);
       let exitFace = select(brickLo, brickLo + vec3<f32>(U.brickSize), qStep > vec3<f32>(0.0));
@@ -244,7 +263,7 @@ fn fs(in: VertexOut) -> FragOut {
       continue;
     }
 
-    if (DEBUG_EMPTY && applyWindow(brickMax) <= 0.0) {
+    if (walkEverything && applyWindow(brickMax) <= 0.0) {
       let local = q - vec3<f32>(bc) * U.brickSize;
       let toFace = min(local, vec3<f32>(U.brickSize) - local);
       let band = clamp(U.pixelVoxels, 0.5, U.brickSize * 0.25);
@@ -282,6 +301,7 @@ fn fs(in: VertexOut) -> FragOut {
     }
 
     let value = sampleTrilinear(q);
+    fetched = fetched + 1u;
     maxValue = max(maxValue, value);
     minValue = min(minValue, value);
     sum = sum + value;
@@ -289,6 +309,13 @@ fn fs(in: VertexOut) -> FragOut {
     let gray = applyWindow(value);
     compositeColor = compositeColor + (1.0 - compositeAlpha) * gray * gray;
     compositeAlpha = compositeAlpha + (1.0 - compositeAlpha) * gray;
+    if (BLEND_MODE == 0u) {
+      imageDone = applyWindow(maxValue) >= 1.0;
+    } else if (BLEND_MODE == 1u) {
+      imageDone = applyWindow(minValue) <= 0.0;
+    } else if (BLEND_MODE == 3u) {
+      imageDone = compositeAlpha > 0.995;
+    }
   }
 
   var gray = 0.0;
@@ -305,8 +332,11 @@ fn fs(in: VertexOut) -> FragOut {
   if (debugAlpha > 0.0) {
     rgb = mix(rgb, vec3<f32>(1.0, 0.08, 0.55), debugAlpha);
   }
+  if (DEBUG_VIEW == 2u) {
+    rgb = select(heatColor(log2(1.0 + f32(fetched)) / 8.0), vec3<f32>(0.0), fetched == 0u);
+  }
   out.color = vec4<f32>(rgb, 1.0);
-  out.segments = packSegments(seen);
+${segEnabled ? '  out.segments = packSegments(seen);' : ''}
   return out;
 }
 `;

@@ -34,8 +34,8 @@
       <button id="antialiasing" class="cursor-pointer text-stone-50 hover:underline" type="button">
         Antialiasing: on
       </button>
-      <button id="debug-blocks" class="cursor-pointer text-stone-400 hover:underline" type="button">
-        Empty blocks: off
+      <button id="debug-view" class="cursor-pointer text-stone-400 hover:underline" type="button">
+        Debug: off
       </button>
       <div id="global-controls" class="flex items-center gap-4"></div>
       <div id="status" class="ml-auto text-stone-400 tabular-nums">
@@ -48,6 +48,10 @@
           class="pointer-events-none absolute top-2 left-2.5 tracking-widest text-stone-400 uppercase"
           >Axial</span
         >
+        <span
+          id="axial-time"
+          class="pointer-events-none absolute top-2 right-2.5 text-stone-400 tabular-nums"
+        ></span>
         <canvas id="axial" class="absolute inset-0 block h-full w-full"></canvas>
       </div>
       <div class="relative min-h-0 overflow-hidden bg-black">
@@ -55,6 +59,10 @@
           class="pointer-events-none absolute top-2 left-2.5 tracking-widest text-stone-400 uppercase"
           >Coronal</span
         >
+        <span
+          id="coronal-time"
+          class="pointer-events-none absolute top-2 right-2.5 text-stone-400 tabular-nums"
+        ></span>
         <canvas id="coronal" class="absolute inset-0 block h-full w-full"></canvas>
       </div>
       <div class="relative min-h-0 overflow-hidden bg-black">
@@ -62,6 +70,10 @@
           class="pointer-events-none absolute top-2 left-2.5 tracking-widest text-stone-400 uppercase"
           >Sagittal</span
         >
+        <span
+          id="sagittal-time"
+          class="pointer-events-none absolute top-2 right-2.5 text-stone-400 tabular-nums"
+        ></span>
         <canvas id="sagittal" class="absolute inset-0 block h-full w-full"></canvas>
       </div>
     </main>

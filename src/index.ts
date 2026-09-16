@@ -9,7 +9,7 @@ export type { Rescale } from './volume';
 export { Segmentation, OVERLAP_DEPTH } from './segmentation';
 export type { LabelStyle, SegmentationBrickRegion } from './segmentation';
 
-export { Viewport } from './viewport';
+export { Viewport, DebugView } from './viewport';
 
 export { Camera, cameraForOrientation, fitCamera, worldToCanvas, canvasToWorld } from './camera';
 export type { Orientation, CameraBasis, CanvasPoint } from './camera';
