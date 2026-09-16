@@ -1,26 +1,47 @@
+import { bytesPerVoxel } from '../brick-store';
+import type { VolumeFormat } from '../geometry';
 import { dot } from '../math';
 import type { Viewport } from '../viewport';
-import type { Volume } from '../volume';
+import { applyRescale, type Volume } from '../volume';
+import {
+  poolSampleType,
+  poolShape,
+  poolTexelType,
+  poolTextureFormat,
+  slotOrigin,
+  type TexelType,
+} from './atlas';
 import { raycastShader, SEG_SLOTS_PER_AXIS, segmentationResolveShader } from './raycast-shader';
 import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 48;
 const RANGE_FLOATS = 4;
+const PAGE_INTS = 2;
 const SEG_SLOTS_PER_LAYER = SEG_SLOTS_PER_AXIS * SEG_SLOTS_PER_AXIS;
 
 interface VolumeResource {
-  texture: GPUTexture;
-  view: GPUTextureView;
+  format: VolumeFormat;
+  pool: GPUTexture;
+  poolView: GPUTextureView;
+  poolSlotsPerAxis: number;
+  poolSlotCount: number;
   rangeTexture: GPUTexture;
   rangeView: GPUTextureView;
   rangeData: Float32Array;
+  pageTexture: GPUTexture;
+  pageView: GPUTextureView;
+  pageData: Int32Array;
   segOccupancy: Uint8Array;
   segAtlas: GPUTexture | null;
   segAtlasView: GPUTextureView | null;
-  segSlots: Int32Array;
   segSlotCount: number;
   labelBuffer: GPUBuffer;
   labelVersion: number;
+}
+
+interface PipelineSet {
+  layout: GPUBindGroupLayout;
+  pipeline: GPURenderPipeline;
 }
 
 interface ViewportResource {
@@ -38,14 +59,12 @@ interface ViewportResource {
 export class GPURenderer implements Renderer {
   private device!: GPUDevice;
   private format!: GPUTextureFormat;
-  private pipeline!: GPURenderPipeline;
-  private bindGroupLayout!: GPUBindGroupLayout;
   private resolvePipeline!: GPURenderPipeline;
   private resolveBindGroupLayout!: GPUBindGroupLayout;
   private emptySegTexture!: GPUTexture;
   private emptySegView!: GPUTextureView;
-  private volumeSampler: GPUSampler | null = null;
 
+  private readonly pipelines = new Map<TexelType, PipelineSet>();
   private readonly volumes = new Map<string, VolumeResource>();
   private readonly viewports = new Map<string, ViewportResource>();
 
@@ -57,58 +76,13 @@ export class GPURenderer implements Renderer {
     if (!adapter) {
       throw new Error('No WebGPU adapter found.');
     }
-    const filterable = adapter.features.has('float32-filterable');
     this.device = await adapter.requestDevice({
-      requiredFeatures: filterable ? ['float32-filterable'] : [],
       requiredLimits: {
         maxBufferSize: adapter.limits.maxBufferSize,
         maxTextureDimension3D: adapter.limits.maxTextureDimension3D,
       },
     });
     this.format = navigator.gpu.getPreferredCanvasFormat();
-    if (filterable) {
-      this.volumeSampler = this.device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
-    }
-
-    const module = this.device.createShaderModule({ code: raycastShader(filterable) });
-    const layoutEntries: GPUBindGroupLayoutEntry[] = [
-      {
-        binding: 0,
-        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-        buffer: { type: 'uniform' },
-      },
-      {
-        binding: 1,
-        visibility: GPUShaderStage.FRAGMENT,
-        texture: {
-          sampleType: filterable ? 'float' : 'unfilterable-float',
-          viewDimension: '3d',
-        },
-      },
-      {
-        binding: 2,
-        visibility: GPUShaderStage.FRAGMENT,
-        texture: { sampleType: 'uint', viewDimension: '3d' },
-      },
-      {
-        binding: 3,
-        visibility: GPUShaderStage.FRAGMENT,
-        buffer: { type: 'read-only-storage' },
-      },
-      {
-        binding: 4,
-        visibility: GPUShaderStage.FRAGMENT,
-        texture: { sampleType: 'unfilterable-float', viewDimension: '3d' },
-      },
-    ];
-    if (filterable) {
-      layoutEntries.push({
-        binding: 5,
-        visibility: GPUShaderStage.FRAGMENT,
-        sampler: { type: 'filtering' },
-      });
-    }
-    this.bindGroupLayout = this.device.createBindGroupLayout({ entries: layoutEntries });
     this.emptySegTexture = this.device.createTexture({
       size: { width: 1, height: 1, depthOrArrayLayers: 1 },
       dimension: '3d',
@@ -116,16 +90,6 @@ export class GPURenderer implements Renderer {
       usage: GPUTextureUsage.TEXTURE_BINDING,
     });
     this.emptySegView = this.emptySegTexture.createView();
-    this.pipeline = this.device.createRenderPipeline({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
-      vertex: { module, entryPoint: 'vs' },
-      fragment: {
-        module,
-        entryPoint: 'fs',
-        targets: [{ format: this.format }, { format: 'rgba32uint' }],
-      },
-      primitive: { topology: 'triangle-list' },
-    });
 
     const resolveModule = this.device.createShaderModule({ code: segmentationResolveShader() });
     this.resolveBindGroupLayout = this.device.createBindGroupLayout({
@@ -169,36 +133,102 @@ export class GPURenderer implements Renderer {
     });
   }
 
+  private pipelineFor(format: VolumeFormat): PipelineSet {
+    const texelType = poolTexelType(format);
+    const existing = this.pipelines.get(texelType);
+    if (existing) return existing;
+    const module = this.device.createShaderModule({ code: raycastShader(texelType) });
+    const layout = this.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform' },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: poolSampleType(format), viewDimension: '3d' },
+        },
+        {
+          binding: 2,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'uint', viewDimension: '3d' },
+        },
+        {
+          binding: 3,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: 'read-only-storage' },
+        },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'unfilterable-float', viewDimension: '3d' },
+        },
+        {
+          binding: 5,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'sint', viewDimension: '3d' },
+        },
+      ],
+    });
+    const pipeline = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+      vertex: { module, entryPoint: 'vs' },
+      fragment: {
+        module,
+        entryPoint: 'fs',
+        targets: [{ format: this.format }, { format: 'rgba32uint' }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+    const set = { layout, pipeline };
+    this.pipelines.set(texelType, set);
+    return set;
+  }
+
   onVolumeCreated(volume: Volume): void {
-    const [width, height, depth] = volume.geometry.dims;
-    const limit = this.device.limits.maxTextureDimension3D;
-    if (width > limit || height > limit || depth > limit) {
-      throw new Error(`Volume ${width}x${height}x${depth} exceeds max 3D texture size ${limit}.`);
-    }
-    const texture = this.device.createTexture({
-      size: { width, height, depthOrArrayLayers: depth },
+    const { brickSize, bricksPerAxis } = volume.store;
+    const [nbx, nby, nbz] = bricksPerAxis;
+    const brickCount = nbx * nby * nbz;
+    const shape = poolShape(brickCount, brickSize, this.device.limits.maxTextureDimension3D);
+    const pool = this.device.createTexture({
+      size: {
+        width: shape.slotsPerAxis * brickSize,
+        height: shape.slotsPerAxis * brickSize,
+        depthOrArrayLayers: shape.layers * brickSize,
+      },
       dimension: '3d',
-      format: 'r32float',
+      format: poolTextureFormat(volume.format),
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    const [nbx, nby, nbz] = volume.store.bricksPerAxis;
-    const brickCount = nbx * nby * nbz;
     const rangeTexture = this.device.createTexture({
       size: { width: nbx, height: nby, depthOrArrayLayers: nbz },
       dimension: '3d',
       format: 'rgba32float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
+    const pageTexture = this.device.createTexture({
+      size: { width: nbx, height: nby, depthOrArrayLayers: nbz },
+      dimension: '3d',
+      format: 'rg32sint',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
     this.volumes.set(volume.id, {
-      texture,
-      view: texture.createView(),
+      format: volume.format,
+      pool,
+      poolView: pool.createView(),
+      poolSlotsPerAxis: shape.slotsPerAxis,
+      poolSlotCount: 0,
       rangeTexture,
       rangeView: rangeTexture.createView(),
       rangeData: new Float32Array(brickCount * RANGE_FLOATS),
+      pageTexture,
+      pageView: pageTexture.createView(),
+      pageData: new Int32Array(brickCount * PAGE_INTS),
       segOccupancy: new Uint8Array(brickCount),
       segAtlas: null,
       segAtlasView: null,
-      segSlots: new Int32Array(brickCount).fill(-1),
       segSlotCount: 0,
       labelBuffer: this.device.createBuffer({
         size: volume.segmentation.labelTable.byteLength,
@@ -211,10 +241,7 @@ export class GPURenderer implements Renderer {
   onVolumeDestroyed(id: string): void {
     const resource = this.volumes.get(id);
     if (!resource) return;
-    resource.texture.destroy();
-    resource.rangeTexture.destroy();
-    resource.segAtlas?.destroy();
-    resource.labelBuffer.destroy();
+    releaseVolumeResource(resource);
     this.volumes.delete(id);
     for (const viewport of this.viewports.values()) {
       if (viewport.bindGroupVolumeId === id) {
@@ -232,21 +259,31 @@ export class GPURenderer implements Renderer {
   uploadBricks(volume: Volume, brickIndices: number[]): void {
     const resource = this.volumes.get(volume.id);
     if (!resource) return;
+    const { brickSize, bricksPerAxis } = volume.store;
+    const rowBytes = bytesPerVoxel(volume.format);
     for (const index of brickIndices) {
       const brick = volume.store.readBrick(index);
       const [w, h, d] = brick.size;
+      let slotEntry = resource.pageData[index * PAGE_INTS]!;
+      if (slotEntry === 0) {
+        slotEntry = ++resource.poolSlotCount;
+        resource.pageData[index * PAGE_INTS] = slotEntry;
+        this.writePageTexel(resource, bricksPerAxis, index);
+      }
       this.device.queue.writeTexture(
         {
-          texture: resource.texture,
-          origin: { x: brick.origin[0], y: brick.origin[1], z: brick.origin[2] },
+          texture: resource.pool,
+          origin: slotOrigin(slotEntry - 1, resource.poolSlotsPerAxis, brickSize),
         },
         brick.data,
-        { bytesPerRow: w * 4, rowsPerImage: h },
+        { bytesPerRow: w * rowBytes, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
       );
-      resource.rangeData[index * RANGE_FLOATS] = brick.min;
-      resource.rangeData[index * RANGE_FLOATS + 1] = brick.max;
-      this.writeRangeTexel(resource, volume.store.bricksPerAxis, index);
+      const lo = applyRescale(volume.rescale, brick.min);
+      const hi = applyRescale(volume.rescale, brick.max);
+      resource.rangeData[index * RANGE_FLOATS] = Math.min(lo, hi);
+      resource.rangeData[index * RANGE_FLOATS + 1] = Math.max(lo, hi);
+      this.writeRangeTexel(resource, bricksPerAxis, index);
     }
   }
 
@@ -256,7 +293,7 @@ export class GPURenderer implements Renderer {
     const brickSize = volume.segmentation.brickSize;
     let slotsNeeded = resource.segSlotCount;
     for (const index of brickIndices) {
-      if (resource.segSlots[index] === -1) slotsNeeded++;
+      if (resource.pageData[index * PAGE_INTS + 1] === 0) slotsNeeded++;
     }
     this.ensureSegAtlasCapacity(resource, brickSize, slotsNeeded);
     const grid = volume.segmentation.bricksPerAxis;
@@ -264,15 +301,17 @@ export class GPURenderer implements Renderer {
     for (const index of brickIndices) {
       const brick = volume.segmentation.readBrick(index);
       const [w, h, d] = brick.size;
-      let slot = resource.segSlots[index]!;
-      if (slot === -1) {
-        slot = resource.segSlotCount++;
-        resource.segSlots[index] = slot;
-        resource.rangeData[index * RANGE_FLOATS + 3] = slot + 1;
-        this.writeRangeTexel(resource, grid, index);
+      let slotEntry = resource.pageData[index * PAGE_INTS + 1]!;
+      if (slotEntry === 0) {
+        slotEntry = ++resource.segSlotCount;
+        resource.pageData[index * PAGE_INTS + 1] = slotEntry;
+        this.writePageTexel(resource, grid, index);
       }
       this.device.queue.writeTexture(
-        { texture: resource.segAtlas!, origin: slotOrigin(slot, brickSize) },
+        {
+          texture: resource.segAtlas!,
+          origin: slotOrigin(slotEntry - 1, SEG_SLOTS_PER_AXIS, brickSize),
+        },
         brick.data,
         { bytesPerRow: w * 8, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
@@ -305,18 +344,23 @@ export class GPURenderer implements Renderer {
     grid: readonly [number, number, number],
     index: number,
   ): void {
-    const [nbx, nby] = grid;
     this.device.queue.writeTexture(
-      {
-        texture: resource.rangeTexture,
-        origin: {
-          x: index % nbx,
-          y: Math.floor(index / nbx) % nby,
-          z: Math.floor(index / (nbx * nby)),
-        },
-      },
+      { texture: resource.rangeTexture, origin: brickTexel(grid, index) },
       resource.rangeData,
       { offset: index * RANGE_FLOATS * 4, bytesPerRow: RANGE_FLOATS * 4, rowsPerImage: 1 },
+      { width: 1, height: 1, depthOrArrayLayers: 1 },
+    );
+  }
+
+  private writePageTexel(
+    resource: VolumeResource,
+    grid: readonly [number, number, number],
+    index: number,
+  ): void {
+    this.device.queue.writeTexture(
+      { texture: resource.pageTexture, origin: brickTexel(grid, index) },
+      resource.pageData,
+      { offset: index * PAGE_INTS * 4, bytesPerRow: PAGE_INTS * 4, rowsPerImage: 1 },
       { width: 1, height: 1, depthOrArrayLayers: 1 },
     );
   }
@@ -413,19 +457,16 @@ export class GPURenderer implements Renderer {
         resource.bindGroupVolumeId !== viewport.volume.id ||
         resource.bindGroupSegView !== segView
       ) {
-        const entries: GPUBindGroupEntry[] = [
-          { binding: 0, resource: { buffer: resource.uniformBuffer } },
-          { binding: 1, resource: volumeResource.view },
-          { binding: 2, resource: segView },
-          { binding: 3, resource: { buffer: volumeResource.labelBuffer } },
-          { binding: 4, resource: volumeResource.rangeView },
-        ];
-        if (this.volumeSampler) {
-          entries.push({ binding: 5, resource: this.volumeSampler });
-        }
         resource.bindGroup = this.device.createBindGroup({
-          layout: this.bindGroupLayout,
-          entries,
+          layout: this.pipelineFor(volumeResource.format).layout,
+          entries: [
+            { binding: 0, resource: { buffer: resource.uniformBuffer } },
+            { binding: 1, resource: volumeResource.poolView },
+            { binding: 2, resource: segView },
+            { binding: 3, resource: { buffer: volumeResource.labelBuffer } },
+            { binding: 4, resource: volumeResource.rangeView },
+            { binding: 5, resource: volumeResource.pageView },
+          ],
         });
         resource.bindGroupVolumeId = viewport.volume.id;
         resource.bindGroupSegView = segView;
@@ -444,6 +485,7 @@ export class GPURenderer implements Renderer {
         segEnabled,
         viewport.segmentationAntialiasing,
         viewport.debugEmptyBlocks,
+        volumeResource.poolSlotsPerAxis,
       );
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
 
@@ -483,7 +525,7 @@ export class GPURenderer implements Renderer {
           },
         ],
       });
-      pass.setPipeline(this.pipeline);
+      pass.setPipeline(this.pipelineFor(volumeResource.format).pipeline);
       pass.setBindGroup(0, resource.bindGroup);
       pass.draw(3);
       pass.end();
@@ -520,23 +562,27 @@ export class GPURenderer implements Renderer {
 
   destroy(): void {
     for (const id of this.viewports.keys()) this.destroyViewport(id);
-    for (const resource of this.volumes.values()) {
-      resource.texture.destroy();
-      resource.rangeTexture.destroy();
-      resource.segAtlas?.destroy();
-      resource.labelBuffer.destroy();
-    }
+    for (const resource of this.volumes.values()) releaseVolumeResource(resource);
     this.volumes.clear();
     this.emptySegTexture.destroy();
     this.device.destroy();
   }
 }
 
-function slotOrigin(slot: number, brickSize: number): GPUOrigin3DDict {
+function releaseVolumeResource(resource: VolumeResource): void {
+  resource.pool.destroy();
+  resource.rangeTexture.destroy();
+  resource.pageTexture.destroy();
+  resource.segAtlas?.destroy();
+  resource.labelBuffer.destroy();
+}
+
+function brickTexel(grid: readonly [number, number, number], index: number): GPUOrigin3DDict {
+  const [nbx, nby] = grid;
   return {
-    x: (slot % SEG_SLOTS_PER_AXIS) * brickSize,
-    y: (Math.floor(slot / SEG_SLOTS_PER_AXIS) % SEG_SLOTS_PER_AXIS) * brickSize,
-    z: Math.floor(slot / SEG_SLOTS_PER_LAYER) * brickSize,
+    x: index % nbx,
+    y: Math.floor(index / nbx) % nby,
+    z: Math.floor(index / (nbx * nby)),
   };
 }
 
@@ -569,6 +615,7 @@ function writeUniforms(
   segEnabled: boolean,
   segAntialias: boolean,
   debugEmptyBlocks: boolean,
+  poolSlotsPerAxis: number,
 ): void {
   const camera = viewport.camera;
   const { right, trueUp, normal } = camera.basis();
@@ -639,4 +686,7 @@ function writeUniforms(
   arr[42] = store.bricksPerAxis[2];
   arr[43] = store.brickSize;
   arr[44] = debugEmptyBlocks ? 1 : 0;
+  arr[45] = viewport.volume.rescale.slope;
+  arr[46] = viewport.volume.rescale.intercept;
+  arr[47] = poolSlotsPerAxis;
 }

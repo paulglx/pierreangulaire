@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 import { BrickState, BrickStore } from '../src/brick-store';
 import { cameraForOrientation, canvasToWorld, worldToCanvas } from '../src/camera';
 import { type VolumeGeometry, indexToWorld, worldToIndex } from '../src/geometry';
+import { Volume } from '../src/volume';
 
 const identity: VolumeGeometry['direction'] = [
   [1, 0, 0],
@@ -68,4 +69,50 @@ test('axial camera centers the focal point on the canvas', () => {
   const world = canvasToWorld(camera, { x: 128, y: 128 }, 256, 256);
   expect(world[0]).toBeCloseTo(camera.focalPoint[0]);
   expect(world[1]).toBeCloseTo(camera.focalPoint[1]);
+});
+
+test('int16 store keeps raw voxels in per-brick arrays and exposes exact-size bricks', () => {
+  const geometry: VolumeGeometry = {
+    dims: [6, 4, 3],
+    spacing: [1, 1, 1],
+    origin: [0, 0, 0],
+    direction: identity,
+  };
+  const store = new BrickStore(geometry, 'int16', 4);
+  expect(store.bricksPerAxis).toEqual([2, 1, 1]);
+  expect(store.sampleVoxel(0, 0, 0)).toBeNaN();
+
+  const plane = new Int16Array(24);
+  for (let i = 0; i < plane.length; i++) plane[i] = i - 12;
+  for (let k = 0; k < 3; k++) store.writeSlice(k, plane);
+
+  expect(store.sampleVoxel(5, 3, 2)).toBe(11);
+  expect(store.sampleVoxel(4, 0, 1)).toBe(-8);
+  expect(store.takeDirtyBricks()).toEqual([0, 1]);
+
+  const edge = store.readBrick(1);
+  expect(edge.origin).toEqual([4, 0, 0]);
+  expect(edge.size).toEqual([2, 4, 3]);
+  expect(edge.data).toBeInstanceOf(Int16Array);
+  expect(edge.data.length).toBe(24);
+  expect(edge.min).toBe(-8);
+  expect(edge.max).toBe(11);
+  expect(edge.data[0]).toBe(-8);
+  expect(edge.data[1]).toBe(-7);
+  expect(edge.data[2]).toBe(-2);
+});
+
+test('volume sampling applies the rescale to raw stored voxels', () => {
+  const geometry: VolumeGeometry = {
+    dims: [2, 2, 1],
+    spacing: [1, 1, 1],
+    origin: [0, 0, 0],
+    direction: identity,
+  };
+  const volume = new Volume('v', geometry, 'uint16', 4, { slope: 0.5, intercept: -1024 });
+  volume.writeSlice(0, new Uint16Array([0, 2048, 4, 6]));
+  expect(volume.store.sampleVoxel(1, 0, 0)).toBe(2048);
+  expect(volume.sampleVoxel(1, 0, 0)).toBe(0);
+  expect(volume.sampleVoxel(0, 0, 0)).toBe(-1024);
+  expect(volume.sampleVoxel(0, 5, 0)).toBeNaN();
 });

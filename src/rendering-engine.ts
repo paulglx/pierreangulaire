@@ -3,7 +3,7 @@ import type { VolumeFormat, VolumeGeometry } from './geometry';
 import { GPURenderer } from './renderer/gpu-renderer';
 import type { Renderer } from './renderer/renderer';
 import { Viewport } from './viewport';
-import { Volume } from './volume';
+import { type Rescale, Volume } from './volume';
 
 export interface RenderingEngineOptions {
   brickSize?: number;
@@ -43,9 +43,9 @@ export class RenderingEngine {
     return engine;
   }
 
-  createVolume(geometry: VolumeGeometry, format: VolumeFormat): Volume {
+  createVolume(geometry: VolumeGeometry, format: VolumeFormat, rescale?: Rescale): Volume {
     const id = `volume-${this.nextId++}`;
-    const volume = new Volume(id, geometry, format, this.brickSize);
+    const volume = new Volume(id, geometry, format, this.brickSize, rescale);
     this.volumes.set(id, volume);
     this.renderer.onVolumeCreated(volume);
     return volume;

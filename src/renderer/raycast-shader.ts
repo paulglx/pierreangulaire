@@ -1,31 +1,41 @@
+import type { TexelType } from './atlas';
+
 export const SEG_SLOTS_PER_AXIS = 8;
 
-const HARDWARE_TRILINEAR = /* wgsl */ `
-@group(0) @binding(5) var volumeSampler: sampler;
-
-fn sampleTrilinear(q: vec3<f32>) -> f32 {
-  return textureSampleLevel(volume, volumeSampler, (q + vec3<f32>(0.5)) / U.dims, 0.0).r;
-}
-`;
-
-const MANUAL_TRILINEAR = /* wgsl */ `
-fn loadVoxel(c: vec3<i32>, maxIndex: vec3<i32>) -> f32 {
-  let clamped = clamp(c, vec3<i32>(0), maxIndex);
-  return textureLoad(volume, clamped, 0).r;
+const VOLUME_FETCH = /* wgsl */ `
+fn slotCoord(slot: i32, slotsPerAxis: i32) -> vec3<i32> {
+  return vec3<i32>(
+    slot % slotsPerAxis,
+    (slot / slotsPerAxis) % slotsPerAxis,
+    slot / (slotsPerAxis * slotsPerAxis),
+  );
 }
 
-fn sampleTrilinear(q: vec3<f32>) -> f32 {
+fn loadVoxel(c: vec3<i32>) -> f32 {
   let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
+  let clamped = clamp(c, vec3<i32>(0), maxIndex);
+  let brickSize = i32(U.brickSize);
+  let bc = clamped / brickSize;
+  let slotEntry = textureLoad(pageTable, bc, 0).x;
+  if (slotEntry == 0) {
+    return U.rescaleIntercept;
+  }
+  let local = clamped - bc * brickSize;
+  let coord = slotCoord(slotEntry - 1, i32(U.poolSlotsPerAxis)) * brickSize + local;
+  return f32(textureLoad(volume, coord, 0).x) * U.rescaleSlope + U.rescaleIntercept;
+}
+
+fn sampleTrilinear(q: vec3<f32>) -> f32 {
   let base = vec3<i32>(floor(q));
   let f = q - floor(q);
-  let c000 = loadVoxel(base + vec3<i32>(0, 0, 0), maxIndex);
-  let c100 = loadVoxel(base + vec3<i32>(1, 0, 0), maxIndex);
-  let c010 = loadVoxel(base + vec3<i32>(0, 1, 0), maxIndex);
-  let c110 = loadVoxel(base + vec3<i32>(1, 1, 0), maxIndex);
-  let c001 = loadVoxel(base + vec3<i32>(0, 0, 1), maxIndex);
-  let c101 = loadVoxel(base + vec3<i32>(1, 0, 1), maxIndex);
-  let c011 = loadVoxel(base + vec3<i32>(0, 1, 1), maxIndex);
-  let c111 = loadVoxel(base + vec3<i32>(1, 1, 1), maxIndex);
+  let c000 = loadVoxel(base + vec3<i32>(0, 0, 0));
+  let c100 = loadVoxel(base + vec3<i32>(1, 0, 0));
+  let c010 = loadVoxel(base + vec3<i32>(0, 1, 0));
+  let c110 = loadVoxel(base + vec3<i32>(1, 1, 0));
+  let c001 = loadVoxel(base + vec3<i32>(0, 0, 1));
+  let c101 = loadVoxel(base + vec3<i32>(1, 0, 1));
+  let c011 = loadVoxel(base + vec3<i32>(0, 1, 1));
+  let c111 = loadVoxel(base + vec3<i32>(1, 1, 1));
   let x00 = mix(c000, c100, f.x);
   let x10 = mix(c010, c110, f.x);
   let x01 = mix(c001, c101, f.x);
@@ -61,6 +71,9 @@ struct Uniforms {
   bricksPerAxis: vec3<f32>,
   brickSize: f32,
   debugEmptyBlocks: f32,
+  rescaleSlope: f32,
+  rescaleIntercept: f32,
+  poolSlotsPerAxis: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
@@ -101,30 +114,26 @@ fn worldDirToIndex(v: vec3<f32>) -> vec3<f32> {
 }
 `;
 
-export function raycastShader(filterableVolume: boolean): string {
+export function raycastShader(texelType: TexelType): string {
   return /* wgsl */ `
 ${SHARED}
-@group(0) @binding(1) var volume: texture_3d<f32>;
+@group(0) @binding(1) var volume: texture_3d<${texelType}>;
 @group(0) @binding(2) var segmentation: texture_3d<u32>;
 @group(0) @binding(3) var<storage, read> labels: array<vec4<f32>>;
 @group(0) @binding(4) var brickRange: texture_3d<f32>;
-${filterableVolume ? HARDWARE_TRILINEAR : MANUAL_TRILINEAR}
+@group(0) @binding(5) var pageTable: texture_3d<i32>;
+${VOLUME_FETCH}
 fn slotsAt(q: vec3<f32>) -> vec4<u32> {
   let maxIndex = vec3<i32>(U.dims) - vec3<i32>(1);
   let c = clamp(vec3<i32>(round(q)), vec3<i32>(0), maxIndex);
   let brickSize = i32(U.brickSize);
   let bc = c / brickSize;
-  let slotEntry = i32(textureLoad(brickRange, bc, 0).w);
+  let slotEntry = textureLoad(pageTable, bc, 0).y;
   if (slotEntry == 0) {
     return vec4<u32>(0u);
   }
-  let slot = slotEntry - 1;
-  let slotCoord = vec3<i32>(
-    slot % ${SEG_SLOTS_PER_AXIS},
-    (slot / ${SEG_SLOTS_PER_AXIS}) % ${SEG_SLOTS_PER_AXIS},
-    slot / ${SEG_SLOTS_PER_AXIS * SEG_SLOTS_PER_AXIS},
-  );
-  return textureLoad(segmentation, slotCoord * brickSize + c - bc * brickSize, 0);
+  let coord = slotCoord(slotEntry - 1, ${SEG_SLOTS_PER_AXIS}) * brickSize + c - bc * brickSize;
+  return textureLoad(segmentation, coord, 0);
 }
 
 fn inBounds(q: vec3<f32>) -> bool {
@@ -203,6 +212,7 @@ fn fs(in: VertexOut) -> FragOut {
   var seen: array<u32, 8>;
   var seenCount = 0u;
   var lastBrick = vec3<i32>(-2);
+  var brickResident = false;
   var brickMin = 0.0;
   var brickMax = 0.0;
   var segOccupied = 0.0;
@@ -226,19 +236,22 @@ fn fs(in: VertexOut) -> FragOut {
     let bc = brickCoord(q);
     if (any(bc != lastBrick)) {
       let r = textureLoad(brickRange, bc, 0);
+      brickResident = textureLoad(pageTable, bc, 0).x != 0;
       brickMin = r.x;
       brickMax = r.y;
       segOccupied = r.z;
       lastBrick = bc;
     }
 
-    var imageSkip = false;
-    if (mode == 0u) {
-      imageSkip = brickMax <= maxValue;
-    } else if (mode == 1u) {
-      imageSkip = brickMin >= minValue;
-    } else if (mode == 3u) {
-      imageSkip = applyWindow(brickMax) <= 0.0 || compositeAlpha > 0.995;
+    var imageSkip = !brickResident;
+    if (brickResident) {
+      if (mode == 0u) {
+        imageSkip = brickMax <= maxValue;
+      } else if (mode == 1u) {
+        imageSkip = brickMin >= minValue;
+      } else if (mode == 3u) {
+        imageSkip = applyWindow(brickMax) <= 0.0 || compositeAlpha > 0.995;
+      }
     }
     let segNeeded = U.segEnabled > 0.5 && segOccupied > 0.5 && seenCount < 8u;
 

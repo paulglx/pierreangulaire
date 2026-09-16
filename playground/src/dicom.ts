@@ -1,16 +1,17 @@
 import dicomParser, { type DataSet, type Element } from 'dicom-parser';
-import type { Vec3, VolumeFormat, VolumeGeometry } from 'pierreangulaire';
+import type { Rescale, Vec3, VolumeFormat, VolumeGeometry } from 'pierreangulaire';
 import { decodeJpegLossless, decodeRle, type FrameInfo, type PixelSamples } from './decode';
 
 export interface SeriesStream {
   geometry: VolumeGeometry;
   format: VolumeFormat;
+  rescale: Rescale;
   windowCenter: number;
   windowWidth: number;
   hasTaggedWindow: boolean;
   description: string;
   sliceCount: number;
-  decodeSlice(index: number): Float32Array | null;
+  decodeSlice(index: number): PixelSamples | null;
 }
 
 interface SliceSource {
@@ -98,29 +99,52 @@ function decodeSamples(
   return readNativeSamples(dataSet, pixelData, info);
 }
 
-function readPixelValues(dataSet: DataSet, transferSyntax: string): Float32Array | null {
-  const pixelData = dataSet.elements['x7fe00010'];
+function frameInfo(dataSet: DataSet): FrameInfo | null {
   const rows = dataSet.uint16('x00280010');
   const columns = dataSet.uint16('x00280011');
-  if (!pixelData || !rows || !columns) return null;
-  if ((dataSet.uint16('x00280002') ?? 1) !== 1) {
-    throw new Error('Only single-sample grayscale images are supported.');
-  }
-
-  const info: FrameInfo = {
+  if (!rows || !columns) return null;
+  return {
     rows,
     columns,
     bitsAllocated: dataSet.uint16('x00280100') ?? 16,
     signed: dataSet.uint16('x00280103') === 1,
   };
-  const slope = dataSet.floatString('x00281053') ?? 1;
-  const intercept = dataSet.floatString('x00281052') ?? 0;
+}
 
+function volumeFormat(info: FrameInfo): VolumeFormat {
+  if (info.bitsAllocated <= 8) return info.signed ? 'int16' : 'uint8';
+  return info.signed ? 'int16' : 'uint16';
+}
+
+function readRescale(dataSet: DataSet): Rescale {
+  return {
+    slope: dataSet.floatString('x00281053') ?? 1,
+    intercept: dataSet.floatString('x00281052') ?? 0,
+  };
+}
+
+function alignRescale(raw: PixelSamples, from: Rescale, to: Rescale): PixelSamples {
+  if (from.slope === to.slope && from.intercept === to.intercept) return raw;
+  const aligned = raw.slice();
+  for (let i = 0; i < raw.length; i++) {
+    aligned[i] = Math.round((raw[i]! * from.slope + from.intercept - to.intercept) / to.slope);
+  }
+  return aligned;
+}
+
+function readPixelSamples(
+  dataSet: DataSet,
+  transferSyntax: string,
+  rescale: Rescale,
+): PixelSamples | null {
+  const pixelData = dataSet.elements['x7fe00010'];
+  const info = frameInfo(dataSet);
+  if (!pixelData || !info) return null;
+  if ((dataSet.uint16('x00280002') ?? 1) !== 1) {
+    throw new Error('Only single-sample grayscale images are supported.');
+  }
   const raw = decodeSamples(dataSet, pixelData, transferSyntax, info);
-  const count = rows * columns;
-  const values = new Float32Array(count);
-  for (let i = 0; i < count; i++) values[i] = raw[i]! * slope + intercept;
-  return values;
+  return alignRescale(raw, readRescale(dataSet), rescale);
 }
 
 function sliceMetadata(dataSet: DataSet): { position: Vec3; transferSyntax: string } | null {
@@ -212,10 +236,12 @@ export async function openSeries(files: File[]): Promise<SeriesStream> {
   const taggedWidth = reference.floatString('x00281051');
   const hasTaggedWindow =
     taggedCenter !== undefined && taggedWidth !== undefined && taggedWidth > 0;
+  const rescale = readRescale(reference);
 
   return {
     geometry,
-    format: 'float32',
+    format: volumeFormat(frameInfo(reference)!),
+    rescale,
     windowCenter: hasTaggedWindow ? taggedCenter : 0,
     windowWidth: hasTaggedWindow ? taggedWidth : 1,
     hasTaggedWindow,
@@ -224,9 +250,9 @@ export async function openSeries(files: File[]): Promise<SeriesStream> {
     decodeSlice(index) {
       const source = sources[index];
       if (!source?.dataSet) return null;
-      const values = readPixelValues(source.dataSet, source.transferSyntax);
+      const samples = readPixelSamples(source.dataSet, source.transferSyntax, rescale);
       source.dataSet = undefined;
-      return values;
+      return samples;
     },
   };
 }

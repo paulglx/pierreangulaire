@@ -72,7 +72,7 @@ export class Viewport {
 
   sampleVoxel(world: Vec3): number {
     const index = worldToIndex(this.volume.geometry, world);
-    return this.volume.store.sampleVoxel(
+    return this.volume.sampleVoxel(
       Math.round(index[0]),
       Math.round(index[1]),
       Math.round(index[2]),

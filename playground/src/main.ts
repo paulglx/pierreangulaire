@@ -1,4 +1,5 @@
 import {
+  applyRescale,
   BlendMode,
   indexToWorld,
   initRenderingEngine,
@@ -314,23 +315,29 @@ async function streamSlices(
   series: SeriesStream,
   onRange: (min: number, max: number) => void,
 ): Promise<ControlRange> {
-  let min = Number.POSITIVE_INFINITY;
-  let max = Number.NEGATIVE_INFINITY;
+  let rawMin = Number.POSITIVE_INFINITY;
+  let rawMax = Number.NEGATIVE_INFINITY;
+  const scaled = (): [number, number] => {
+    const lo = applyRescale(series.rescale, rawMin);
+    const hi = applyRescale(series.rescale, rawMax);
+    return [Math.min(lo, hi), Math.max(lo, hi)];
+  };
   for (let k = 0; k < series.sliceCount; k++) {
     const slice = series.decodeSlice(k);
     if (!slice) continue;
     for (let i = 0; i < slice.length; i++) {
       const value = slice[i]!;
-      if (value < min) min = value;
-      if (value > max) max = value;
+      if (value < rawMin) rawMin = value;
+      if (value > rawMax) rawMax = value;
     }
     volume.writeSlice(k, slice);
     if (k % 8 === 0) {
       setStatus(`Loading slice ${k + 1} / ${series.sliceCount}…`);
-      onRange(min, max);
+      onRange(...scaled());
       await nextFrame();
     }
   }
+  const [min, max] = scaled();
   onRange(min, max);
   const center = series.hasTaggedWindow ? series.windowCenter : (min + max) / 2;
   const width = series.hasTaggedWindow ? series.windowWidth : Math.max(1, max - min);
@@ -366,7 +373,7 @@ async function open(files: File[]): Promise<void> {
   kebabAngle = 0;
   kebabLast = 0;
 
-  const volume = engine.createVolume(series.geometry, series.format);
+  const volume = engine.createVolume(series.geometry, series.format, series.rescale);
   activeVolume = volume;
   const [dx, dy, dz] = series.geometry.dims;
 

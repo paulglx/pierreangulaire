@@ -1,13 +1,15 @@
-import { type VolumeFormat, type VolumeGeometry, voxelCount } from './geometry';
+import type { VolumeFormat, VolumeGeometry } from './geometry';
 import type { Vec3 } from './math';
 
 export const BrickState = { Absent: 0, Loading: 1, Resident: 2 } as const;
 export type BrickState = (typeof BrickState)[keyof typeof BrickState];
 
+export type VoxelArray = Int16Array | Uint16Array | Uint8Array | Float32Array;
+
 export interface BrickRegion {
   readonly origin: readonly [number, number, number];
   readonly size: readonly [number, number, number];
-  readonly data: Float32Array;
+  readonly data: VoxelArray;
   readonly min: number;
   readonly max: number;
 }
@@ -45,9 +47,19 @@ export function brickBounds(
   };
 }
 
-type VoxelArray = Int16Array | Uint16Array | Uint8Array | Float32Array;
+export function bytesPerVoxel(format: VolumeFormat): number {
+  switch (format) {
+    case 'int16':
+    case 'uint16':
+      return 2;
+    case 'uint8':
+      return 1;
+    case 'float32':
+      return 4;
+  }
+}
 
-function createVoxelArray(format: VolumeFormat, count: number): VoxelArray {
+export function createVoxelArray(format: VolumeFormat, count: number): VoxelArray {
   switch (format) {
     case 'int16':
       return new Int16Array(count);
@@ -66,7 +78,7 @@ export class BrickStore {
   readonly brickSize: number;
   readonly bricksPerAxis: readonly [number, number, number];
 
-  private readonly voxels: VoxelArray;
+  private readonly bricks: (VoxelArray | null)[];
   private readonly states: Uint8Array;
   private readonly sliceWritten: Uint8Array;
   private readonly bandCount: Int32Array;
@@ -78,10 +90,9 @@ export class BrickStore {
     this.brickSize = brickSize;
     const dz = geometry.dims[2];
     this.bricksPerAxis = brickGridSize(geometry.dims, brickSize);
-    this.voxels = createVoxelArray(format, voxelCount(geometry));
-    this.states = new Uint8Array(
-      this.bricksPerAxis[0] * this.bricksPerAxis[1] * this.bricksPerAxis[2],
-    );
+    const brickCount = this.bricksPerAxis[0] * this.bricksPerAxis[1] * this.bricksPerAxis[2];
+    this.bricks = Array.from({ length: brickCount }, () => null);
+    this.states = new Uint8Array(brickCount);
     this.sliceWritten = new Uint8Array(dz);
     this.bandCount = new Int32Array(this.bricksPerAxis[2]);
   }
@@ -100,12 +111,28 @@ export class BrickStore {
 
   writeSlice(k: number, data: ArrayLike<number>): void {
     const [dx, dy] = this.geometry.dims;
-    const planeSize = dx * dy;
-    this.voxels.set(data as ArrayLike<number> & { length: number }, k * planeSize);
+    const [nbx, nby] = this.bricksPerAxis;
+    const size = this.brickSize;
+    const bz = Math.floor(k / size);
+    const kz = k - bz * size;
+    for (let by = 0; by < nby; by++) {
+      const oy = by * size;
+      const h = Math.min(size, dy - oy);
+      for (let bx = 0; bx < nbx; bx++) {
+        const ox = bx * size;
+        const w = Math.min(size, dx - ox);
+        const index = bx + by * nbx + bz * nbx * nby;
+        const brick = this.bricks[index] ?? this.allocateBrick(index);
+        for (let y = 0; y < h; y++) {
+          const src = ox + (oy + y) * dx;
+          const dst = (kz * h + y) * w;
+          for (let x = 0; x < w; x++) brick[dst + x] = data[src + x]!;
+        }
+      }
+    }
     if (this.sliceWritten[k] === 1) return;
     this.sliceWritten[k] = 1;
 
-    const bz = Math.floor(k / this.brickSize);
     const previous = this.bandCount[bz]!;
     const current = previous + 1;
     this.bandCount[bz] = current;
@@ -126,31 +153,38 @@ export class BrickStore {
       this.bricksPerAxis,
       linearIndex,
     );
-    const [dx, dy] = this.geometry.dims;
-    const [ox, oy, oz] = origin;
     const [w, h, d] = size;
-    const data = new Float32Array(w * h * d);
+    const data = this.bricks[linearIndex] ?? createVoxelArray(this.format, w * h * d);
     let min = Infinity;
     let max = -Infinity;
-    for (let z = 0; z < d; z++) {
-      for (let y = 0; y < h; y++) {
-        const srcRow = ox + (oy + y) * dx + (oz + z) * dx * dy;
-        const dstRow = y * w + z * w * h;
-        for (let x = 0; x < w; x++) {
-          const value = this.voxels[srcRow + x]!;
-          data[dstRow + x] = value;
-          if (value < min) min = value;
-          if (value > max) max = value;
-        }
-      }
+    for (let i = 0; i < data.length; i++) {
+      const value = data[i]!;
+      if (value < min) min = value;
+      if (value > max) max = value;
     }
-    return { origin: [ox, oy, oz], size: [w, h, d], data, min, max };
+    return { origin, size, data, min, max };
   }
 
   sampleVoxel(i: number, j: number, k: number): number {
     const [dx, dy, dz] = this.geometry.dims;
     if (i < 0 || j < 0 || k < 0 || i >= dx || j >= dy || k >= dz) return Number.NaN;
-    return this.voxels[i + j * dx + k * dx * dy]!;
+    const size = this.brickSize;
+    const [nbx, nby] = this.bricksPerAxis;
+    const bx = Math.floor(i / size);
+    const by = Math.floor(j / size);
+    const bz = Math.floor(k / size);
+    const brick = this.bricks[bx + by * nbx + bz * nbx * nby];
+    if (!brick) return Number.NaN;
+    const w = Math.min(size, dx - bx * size);
+    const h = Math.min(size, dy - by * size);
+    return brick[i - bx * size + (j - by * size) * w + (k - bz * size) * w * h]!;
+  }
+
+  private allocateBrick(index: number): VoxelArray {
+    const { size } = brickBounds(this.geometry.dims, this.brickSize, this.bricksPerAxis, index);
+    const brick = createVoxelArray(this.format, size[0] * size[1] * size[2]);
+    this.bricks[index] = brick;
+    return brick;
   }
 
   private bandHeight(bz: number): number {
