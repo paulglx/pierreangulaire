@@ -1,5 +1,12 @@
 import { expect, test } from 'vitest';
-import { atlasSide, packSlotEntry, slotCoord, unpackSlotEntry } from '../src/renderer/atlas';
+import {
+  atlasSide,
+  depthTiling,
+  packSlotEntry,
+  slotCoord,
+  tiledOrigin,
+  unpackSlotEntry,
+} from '../src/renderer/atlas';
 
 test('atlas side is the smallest cube holding the slot count', () => {
   expect(atlasSide(0)).toBe(0);
@@ -39,4 +46,17 @@ test('slot entries pack coordinates and stay non-zero', () => {
     expect(entry).toBeGreaterThan(0);
     expect(unpackSlotEntry(entry)).toEqual(coord);
   }
+});
+
+test('depth tiling folds slices beyond the texture limit into brick-aligned tiles', () => {
+  expect(depthTiling([512, 512, 132], 32, 2048)).toEqual({ tiles: 1, tileDepth: 160 });
+  expect(depthTiling([512, 512, 2048], 32, 2048)).toEqual({ tiles: 1, tileDepth: 2048 });
+  expect(depthTiling([512, 512, 2500], 32, 2048)).toEqual({ tiles: 2, tileDepth: 1280 });
+  expect(depthTiling([512, 512, 8192], 32, 2048)).toEqual({ tiles: 4, tileDepth: 2048 });
+});
+
+test('tiled origins place each brick inside its depth tile', () => {
+  expect(tiledOrigin([32, 64, 96], 1280, 512)).toEqual({ x: 32, y: 64, z: 96 });
+  expect(tiledOrigin([32, 64, 1280], 1280, 512)).toEqual({ x: 544, y: 64, z: 0 });
+  expect(tiledOrigin([8, 16, 320], 320, 133)).toEqual({ x: 141, y: 16, z: 0 });
 });

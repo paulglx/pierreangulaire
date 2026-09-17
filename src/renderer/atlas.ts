@@ -1,4 +1,5 @@
 import type { VolumeFormat } from '../geometry';
+import type { Vec3 } from '../math';
 
 export type TexelType = 'f32' | 'i32' | 'u32';
 
@@ -45,6 +46,27 @@ export function unpackSlotEntry(entry: number): SlotCoord {
     y: (packed >> SLOT_COORD_BITS) & SLOT_COORD_MASK,
     z: packed >> (2 * SLOT_COORD_BITS),
   };
+}
+
+export interface DepthTiling {
+  readonly tiles: number;
+  readonly tileDepth: number;
+}
+
+export function depthTiling(dims: Vec3, brickSize: number, maxDimension: number): DepthTiling {
+  const bricksDeep = Math.ceil(dims[2] / brickSize);
+  const tiles = Math.ceil(bricksDeep / Math.floor(maxDimension / brickSize));
+  return { tiles, tileDepth: Math.ceil(bricksDeep / tiles) * brickSize };
+}
+
+export function tiledOrigin(
+  origin: readonly [number, number, number],
+  tileDepth: number,
+  tileWidth: number,
+): GPUOrigin3DDict {
+  const [x, y, z] = origin;
+  const tile = Math.floor(z / tileDepth);
+  return { x: x + tile * tileWidth, y, z: z - tile * tileDepth };
 }
 
 export function poolTextureFormat(format: VolumeFormat): GPUTextureFormat {

@@ -7,24 +7,27 @@ import { applyRescale, type Volume } from '../volume';
 import {
   atlasSide,
   cellTextureFormat,
+  depthTiling,
   MAX_SLOTS_PER_AXIS,
   packSlotEntry,
   poolSampleType,
   poolTexelType,
   poolTextureFormat,
   slotCoord,
+  tiledOrigin,
   unpackSlotEntry,
   type TexelType,
 } from './atlas';
 import { raycastShader, segmentationResolveShader } from './raycast-shader';
 import type { Renderer } from './renderer';
 
-const UNIFORM_FLOATS = 48;
+const UNIFORM_FLOATS = 52;
 const RANGE_FLOATS = 4;
 const TIMESTAMP_BYTES = 16;
 
 interface VolumeResource {
   format: VolumeFormat;
+  tileDepth: number;
   pool: GPUTexture;
   poolView: GPUTextureView;
   cellTexture: GPUTexture;
@@ -235,22 +238,28 @@ export class GPURenderer implements Renderer {
     const brickCount = nbx * nby * nbz;
     const [dx, dy, dz] = volume.geometry.dims;
     const maxDimension = this.device.limits.maxTextureDimension3D;
-    if (Math.max(dx, dy, dz) > maxDimension) {
+    const { tiles, tileDepth } = depthTiling(
+      volume.geometry.dims,
+      volume.store.brickSize,
+      maxDimension,
+    );
+    if (dy > maxDimension || tiles * dx > maxDimension) {
       throw new Error(
-        `Volume ${dx}×${dy}×${dz} exceeds the device's 3D texture limit of ${maxDimension}.`,
+        `Volume ${dx}×${dy}×${dz} exceeds the device's 3D texture limit of ${maxDimension} even with its depth folded into ${tiles} tiles.`,
       );
     }
+    const depth = Math.min(tileDepth, dz);
     const pool = this.device.createTexture({
-      size: { width: dx, height: dy, depthOrArrayLayers: dz },
+      size: { width: dx * tiles, height: dy, depthOrArrayLayers: depth },
       dimension: '3d',
       format: poolTextureFormat(volume.format),
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     const cellTexture = this.device.createTexture({
       size: {
-        width: Math.ceil(dx / CELL_SIZE),
+        width: Math.ceil(dx / CELL_SIZE) * tiles,
         height: Math.ceil(dy / CELL_SIZE),
-        depthOrArrayLayers: Math.ceil(dz / CELL_SIZE),
+        depthOrArrayLayers: Math.ceil(depth / CELL_SIZE),
       },
       dimension: '3d',
       format: cellTextureFormat(volume.format),
@@ -270,6 +279,7 @@ export class GPURenderer implements Renderer {
     });
     this.volumes.set(volume.id, {
       format: volume.format,
+      tileDepth,
       pool,
       poolView: pool.createView(),
       cellTexture,
@@ -315,12 +325,13 @@ export class GPURenderer implements Renderer {
     if (!resource) return;
     const { bricksPerAxis } = volume.store;
     const rowBytes = bytesPerVoxel(volume.format);
+    const dx = volume.geometry.dims[0];
     for (const index of brickIndices) {
       const brick = volume.store.readBrick(index);
       const [w, h, d] = brick.size;
       const [x, y, z] = brick.origin;
       this.device.queue.writeTexture(
-        { texture: resource.pool, origin: { x, y, z } },
+        { texture: resource.pool, origin: tiledOrigin(brick.origin, resource.tileDepth, dx) },
         brick.data,
         { bytesPerRow: w * rowBytes, rowsPerImage: h },
         { width: w, height: h, depthOrArrayLayers: d },
@@ -329,7 +340,11 @@ export class GPURenderer implements Renderer {
       this.device.queue.writeTexture(
         {
           texture: resource.cellTexture,
-          origin: { x: x / CELL_SIZE, y: y / CELL_SIZE, z: z / CELL_SIZE },
+          origin: tiledOrigin(
+            [x / CELL_SIZE, y / CELL_SIZE, z / CELL_SIZE],
+            resource.tileDepth / CELL_SIZE,
+            Math.ceil(dx / CELL_SIZE),
+          ),
         },
         brick.cellRanges,
         { bytesPerRow: cx * rowBytes * 2, rowsPerImage: cy },
@@ -560,7 +575,12 @@ export class GPURenderer implements Renderer {
       }
 
       const segEnabled = viewport.segmentationVisible && volumeResource.segAtlas !== null;
-      writeUniforms(resource.uniformData, viewport, viewport.segmentationAntialiasing);
+      writeUniforms(
+        resource.uniformData,
+        viewport,
+        viewport.segmentationAntialiasing,
+        volumeResource.tileDepth,
+      );
       this.device.queue.writeBuffer(resource.uniformBuffer, 0, resource.uniformData);
 
       const canvasTexture = resource.context.getCurrentTexture();
@@ -720,7 +740,12 @@ function brickNeighborhood(grid: readonly [number, number, number], index: numbe
   return out;
 }
 
-function writeUniforms(arr: Float32Array, viewport: Viewport, segAntialias: boolean): void {
+function writeUniforms(
+  arr: Float32Array,
+  viewport: Viewport,
+  segAntialias: boolean,
+  tileDepth: number,
+): void {
   const camera = viewport.camera;
   const { right, trueUp, normal } = camera.basis();
   const geometry = viewport.volume.geometry;
@@ -793,4 +818,5 @@ function writeUniforms(arr: Float32Array, viewport: Viewport, segAntialias: bool
   arr[45] = Math.ceil(dims[1] / CELL_SIZE);
   arr[46] = Math.ceil(dims[2] / CELL_SIZE);
   arr[47] = CELL_SIZE;
+  arr[48] = tileDepth;
 }

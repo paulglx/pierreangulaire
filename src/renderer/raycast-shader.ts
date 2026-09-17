@@ -6,6 +6,11 @@ fn slotCoord(slotEntry: i32) -> vec3<i32> {
   return vec3<i32>(packed & 1023, (packed >> 10u) & 1023, packed >> 20u);
 }
 
+fn tileTexel(c: vec3<i32>, tileDepth: i32, tileWidth: i32) -> vec3<i32> {
+  let tile = c.z / tileDepth;
+  return vec3<i32>(c.x + tile * tileWidth, c.y, c.z - tile * tileDepth);
+}
+
 fn loadVoxel(c: vec3<i32>) -> f32 {
   return f32(textureLoad(volume, c, 0).x);
 }
@@ -15,14 +20,17 @@ fn sampleTrilinear(q: vec3<f32>) -> f32 {
   let base = clamp(vec3<i32>(floor(q)), vec3<i32>(0), max(maxIndex - vec3<i32>(1), vec3<i32>(0)));
   let next = min(base + vec3<i32>(1), maxIndex);
   let f = clamp(q - vec3<f32>(base), vec3<f32>(0.0), vec3<f32>(1.0));
-  let c000 = loadVoxel(vec3<i32>(base.x, base.y, base.z));
-  let c100 = loadVoxel(vec3<i32>(next.x, base.y, base.z));
-  let c010 = loadVoxel(vec3<i32>(base.x, next.y, base.z));
-  let c110 = loadVoxel(vec3<i32>(next.x, next.y, base.z));
-  let c001 = loadVoxel(vec3<i32>(base.x, base.y, next.z));
-  let c101 = loadVoxel(vec3<i32>(next.x, base.y, next.z));
-  let c011 = loadVoxel(vec3<i32>(base.x, next.y, next.z));
-  let c111 = loadVoxel(vec3<i32>(next.x, next.y, next.z));
+  let step = next - base;
+  let lo = tileTexel(base, i32(U.tileDepth), i32(U.dims.x));
+  let hi = tileTexel(vec3<i32>(base.xy, next.z), i32(U.tileDepth), i32(U.dims.x));
+  let c000 = loadVoxel(lo);
+  let c100 = loadVoxel(lo + vec3<i32>(step.x, 0, 0));
+  let c010 = loadVoxel(lo + vec3<i32>(0, step.y, 0));
+  let c110 = loadVoxel(lo + vec3<i32>(step.x, step.y, 0));
+  let c001 = loadVoxel(hi);
+  let c101 = loadVoxel(hi + vec3<i32>(step.x, 0, 0));
+  let c011 = loadVoxel(hi + vec3<i32>(0, step.y, 0));
+  let c111 = loadVoxel(hi + vec3<i32>(step.x, step.y, 0));
   let x00 = mix(c000, c100, f.x);
   let x10 = mix(c010, c110, f.x);
   let x01 = mix(c001, c101, f.x);
@@ -59,6 +67,7 @@ struct Uniforms {
   rescaleIntercept: f32,
   cellsPerAxis: vec3<f32>,
   cellSize: f32,
+  tileDepth: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
@@ -136,7 +145,8 @@ fn cellCoord(q: vec3<f32>) -> vec3<i32> {
 }
 
 fn cellRangeAt(cc: vec3<i32>) -> vec2<f32> {
-  let raw = vec2<f32>(textureLoad(cellRange, cc, 0).xy) * U.rescaleSlope + U.rescaleIntercept;
+  let texel = tileTexel(cc, i32(U.tileDepth) / i32(U.cellSize), i32(U.cellsPerAxis.x));
+  let raw = vec2<f32>(textureLoad(cellRange, texel, 0).xy) * U.rescaleSlope + U.rescaleIntercept;
   return vec2<f32>(min(raw.x, raw.y), max(raw.x, raw.y));
 }
 
