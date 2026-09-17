@@ -6,36 +6,49 @@ export interface Phantom {
   readonly scale: number;
   readonly roughness: number;
   readonly grain: number;
-  distance(p: Vec3): number;
+  distance(x: number, y: number, z: number): number;
 }
 
 type Mat3 = readonly [Vec3, Vec3, Vec3];
 
 const TAU = 2 * Math.PI;
+const CELL = 4;
+const CULL_MARGIN = 1.25;
 
-function sphere(p: Vec3, radius: number): number {
-  return Math.hypot(p[0], p[1], p[2]) - radius;
+function sphere(x: number, y: number, z: number, radius: number): number {
+  return Math.hypot(x, y, z) - radius;
 }
 
-function ellipsoid(p: Vec3, radii: Vec3): number {
-  const k0 = Math.hypot(p[0] / radii[0], p[1] / radii[1], p[2] / radii[2]);
-  const k1 = Math.hypot(
-    p[0] / (radii[0] * radii[0]),
-    p[1] / (radii[1] * radii[1]),
-    p[2] / (radii[2] * radii[2]),
+function ellipsoid(x: number, y: number, z: number, rx: number, ry: number, rz: number): number {
+  const k0 = Math.hypot(x / rx, y / ry, z / rz);
+  const k1 = Math.hypot(x / (rx * rx), y / (ry * ry), z / (rz * rz));
+  return k1 === 0 ? -Math.min(rx, ry, rz) : (k0 * (k0 - 1)) / k1;
+}
+
+function cone(
+  x: number,
+  y: number,
+  z: number,
+  ax: number,
+  ay: number,
+  az: number,
+  bx: number,
+  by: number,
+  bz: number,
+  radiusA: number,
+  radiusB: number,
+): number {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const abz = bz - az;
+  const apx = x - ax;
+  const apy = y - ay;
+  const apz = z - az;
+  const lengthSq = abx * abx + aby * aby + abz * abz;
+  const t = Math.max(0, Math.min(1, (apx * abx + apy * aby + apz * abz) / lengthSq));
+  return (
+    Math.hypot(apx - abx * t, apy - aby * t, apz - abz * t) - (radiusA + (radiusB - radiusA) * t)
   );
-  return k1 === 0 ? -Math.min(...radii) : (k0 * (k0 - 1)) / k1;
-}
-
-function cone(p: Vec3, a: Vec3, b: Vec3, radiusA: number, radiusB: number): number {
-  const ab: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-  const ap: Vec3 = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
-  const lengthSq = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
-  const t = Math.max(0, Math.min(1, (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / lengthSq));
-  const dx = ap[0] - ab[0] * t;
-  const dy = ap[1] - ab[1] * t;
-  const dz = ap[2] - ab[2] * t;
-  return Math.hypot(dx, dy, dz) - (radiusA + (radiusB - radiusA) * t);
 }
 
 function unit(v: Vec3): Vec3 {
@@ -49,9 +62,9 @@ const organ: Phantom = {
   scale: 1.6,
   roughness: 0.12,
   grain: 1.2,
-  distance(p) {
-    const body = ellipsoid(p, [1.4, 0.9, 0.6]);
-    const hilum = sphere([p[0], p[1] - 1, p[2]], 0.55);
+  distance(x, y, z) {
+    const body = ellipsoid(x, y, z, 1.4, 0.9, 0.6);
+    const hilum = sphere(x, y - 1, z, 0.55);
     return Math.max(body, -hilum);
   },
 };
@@ -62,11 +75,11 @@ const bone: Phantom = {
   scale: 1.4,
   roughness: 0.05,
   grain: 3,
-  distance(p) {
-    const bend = 0.12 * p[0] * p[0];
-    const shaft = cone([p[0], p[1] - bend, p[2]], [-1.5, 0, 0], [1.5, 0, 0], 0.32, 0.28);
-    const proximal = ellipsoid([p[0] + 1.75, p[1] - 0.2, p[2]], [0.45, 0.6, 0.5]);
-    const distal = ellipsoid([p[0] - 1.75, p[1] - 0.35, p[2]], [0.4, 0.55, 0.7]);
+  distance(x, y, z) {
+    const bend = 0.12 * x * x;
+    const shaft = cone(x, y - bend, z, -1.5, 0, 0, 1.5, 0, 0, 0.32, 0.28);
+    const proximal = ellipsoid(x + 1.75, y - 0.2, z, 0.45, 0.6, 0.5);
+    const distal = ellipsoid(x - 1.75, y - 0.35, z, 0.4, 0.55, 0.7);
     return Math.min(shaft, proximal, distal);
   },
 };
@@ -80,7 +93,9 @@ const SPICULE_DIRECTIONS: readonly Vec3[] = [
   [-0.3, 1, -0.8],
   [0.8, -0.9, -0.3],
 ];
-const SPICULES = SPICULE_DIRECTIONS.map(unit);
+const SPICULE_TIPS = SPICULE_DIRECTIONS.map(unit).map(
+  (d): Vec3 => [d[0] * 1.5, d[1] * 1.5, d[2] * 1.5],
+);
 
 const lesion: Phantom = {
   name: 'spiculated lesion',
@@ -88,11 +103,10 @@ const lesion: Phantom = {
   scale: 1.2,
   roughness: 0.18,
   grain: 2.5,
-  distance(p) {
-    let d = sphere(p, 0.75);
-    for (const direction of SPICULES) {
-      const tip: Vec3 = [direction[0] * 1.5, direction[1] * 1.5, direction[2] * 1.5];
-      d = Math.min(d, cone(p, [0, 0, 0], tip, 0.22, 0.04));
+  distance(x, y, z) {
+    let d = sphere(x, y, z, 0.75);
+    for (const tip of SPICULE_TIPS) {
+      d = Math.min(d, cone(x, y, z, 0, 0, 0, tip[0], tip[1], tip[2], 0.22, 0.04));
     }
     return d;
   },
@@ -109,20 +123,36 @@ const TRUNK_RADII = TRUNK.map((_, i) => 0.24 - (0.08 * i) / TRUNK_SEGMENTS);
 const BRANCH_ROOT = TRUNK[TRUNK_SEGMENTS / 2]!;
 const BRANCH_TIP: Vec3 = [BRANCH_ROOT[0] + 0.9, BRANCH_ROOT[1] + 1.6, BRANCH_ROOT[2] + 0.5];
 
+function trunkSegment(x: number, y: number, z: number, i: number): number {
+  const a = TRUNK[i]!;
+  const b = TRUNK[i + 1]!;
+  return cone(x, y, z, a[0], a[1], a[2], b[0], b[1], b[2], TRUNK_RADII[i]!, TRUNK_RADII[i + 1]!);
+}
+
 const vessel: Phantom = {
   name: 'branching vessel',
   halfExtent: [2.5, 2.1, 0.9],
   scale: 3,
   roughness: 0.03,
   grain: 4,
-  distance(p) {
-    let d = cone(p, BRANCH_ROOT, BRANCH_TIP, 0.14, 0.07);
-    const nearest = Math.floor((p[0] - TRUNK_START) / TRUNK_STEP);
+  distance(x, y, z) {
+    let d = cone(
+      x,
+      y,
+      z,
+      BRANCH_ROOT[0],
+      BRANCH_ROOT[1],
+      BRANCH_ROOT[2],
+      BRANCH_TIP[0],
+      BRANCH_TIP[1],
+      BRANCH_TIP[2],
+      0.14,
+      0.07,
+    );
+    const nearest = Math.floor((x - TRUNK_START) / TRUNK_STEP);
     const first = Math.max(0, nearest - 1);
     const last = Math.min(TRUNK_SEGMENTS - 1, nearest + 1);
-    for (let i = first; i <= last; i++) {
-      d = Math.min(d, cone(p, TRUNK[i]!, TRUNK[i + 1]!, TRUNK_RADII[i]!, TRUNK_RADII[i + 1]!));
-    }
+    for (let i = first; i <= last; i++) d = Math.min(d, trunkSegment(x, y, z, i));
     return d;
   },
 };
@@ -199,6 +229,100 @@ export interface PaintedPhantom {
   readonly radiusMm: number;
 }
 
+interface Placement {
+  readonly phantom: Phantom;
+  readonly center: Vec3;
+  readonly radiusMm: number;
+  readonly rotation: Mat3;
+  readonly seed: Vec3;
+  readonly spacing: Vec3;
+}
+
+interface MaskBox {
+  readonly origin: Vec3;
+  readonly size: Vec3;
+  readonly mask: Uint8Array;
+}
+
+function rasterize(placement: Placement, box: MaskBox): void {
+  const { phantom, center, radiusMm, rotation, seed, spacing } = placement;
+  const { halfExtent, roughness, grain } = phantom;
+  const { origin, size, mask } = box;
+  const [w, h, d] = size;
+  const cellHalfDiagonal =
+    (Math.hypot(CELL * spacing[0], CELL * spacing[1], CELL * spacing[2]) / 2 / radiusMm) *
+    CULL_MARGIN;
+  const cullDistance = cellHalfDiagonal + roughness;
+  const cullExtent = perAxis((a) => halfExtent[a] + cellHalfDiagonal);
+
+  const step = (axis: 0 | 1 | 2): Vec3 =>
+    perAxis((row) => (rotation[row][axis] * spacing[axis]) / radiusMm);
+  const [stepI, stepJ, stepK] = [step(0), step(1), step(2)];
+  const start = perAxis(
+    (row) =>
+      stepI[row] * (origin[0] - center[0]) +
+      stepJ[row] * (origin[1] - center[1]) +
+      stepK[row] * (origin[2] - center[2]),
+  );
+
+  const localX = (i: number, j: number, k: number): number =>
+    start[0] + stepI[0] * i + stepJ[0] * j + stepK[0] * k;
+  const localY = (i: number, j: number, k: number): number =>
+    start[1] + stepI[1] * i + stepJ[1] * j + stepK[1] * k;
+  const localZ = (i: number, j: number, k: number): number =>
+    start[2] + stepI[2] * i + stepJ[2] * j + stepK[2] * k;
+
+  const paintVoxel = (i: number, j: number, k: number): void => {
+    const px = localX(i, j, k);
+    if (Math.abs(px) > halfExtent[0]) return;
+    const py = localY(i, j, k);
+    if (Math.abs(py) > halfExtent[1]) return;
+    const pz = localZ(i, j, k);
+    if (Math.abs(pz) > halfExtent[2]) return;
+    const base = phantom.distance(px, py, pz);
+    if (base > roughness) return;
+    if (
+      base > -roughness &&
+      base + roughness * fbm(px * grain + seed[0], py * grain + seed[1], pz * grain + seed[2]) > 0
+    ) {
+      return;
+    }
+    mask[i + (j + k * h) * w] = 1;
+  };
+
+  for (let ck = 0; ck < d; ck += CELL) {
+    const k1 = Math.min(d, ck + CELL);
+    const mk = (ck + k1 - 1) / 2;
+    for (let cj = 0; cj < h; cj += CELL) {
+      const j1 = Math.min(h, cj + CELL);
+      const mj = (cj + j1 - 1) / 2;
+      for (let ci = 0; ci < w; ci += CELL) {
+        const i1 = Math.min(w, ci + CELL);
+        const mi = (ci + i1 - 1) / 2;
+        const cx = localX(mi, mj, mk);
+        if (Math.abs(cx) > cullExtent[0]) continue;
+        const cy = localY(mi, mj, mk);
+        if (Math.abs(cy) > cullExtent[1]) continue;
+        const cz = localZ(mi, mj, mk);
+        if (Math.abs(cz) > cullExtent[2]) continue;
+        const centerDistance = phantom.distance(cx, cy, cz);
+        if (centerDistance > cullDistance) continue;
+        if (centerDistance < -cullDistance) {
+          for (let k = ck; k < k1; k++) {
+            for (let j = cj; j < j1; j++) mask.fill(1, ci + (j + k * h) * w, i1 + (j + k * h) * w);
+          }
+          continue;
+        }
+        for (let k = ck; k < k1; k++) {
+          for (let j = cj; j < j1; j++) {
+            for (let i = ci; i < i1; i++) paintVoxel(i, j, k);
+          }
+        }
+      }
+    }
+  }
+}
+
 export function paintRandomPhantom(volume: Volume): PaintedPhantom {
   const { geometry, segmentation } = volume;
   const segment = Math.min(65535, (segmentation.segmentsPresent().at(-1) ?? 0) + 1);
@@ -213,8 +337,7 @@ export function paintRandomPhantom(volume: Volume): PaintedPhantom {
   ];
   const rotation = randomRotation();
   const seed: Vec3 = [Math.random() * 1e3, Math.random() * 1e3, Math.random() * 1e3];
-  const { halfExtent, roughness, grain } = phantom;
-  const reach = Math.hypot(...halfExtent) * radiusMm;
+  const reach = Math.hypot(...phantom.halfExtent) * radiusMm;
 
   const origin = perAxis((a) => Math.max(0, Math.floor(center[a] - reach / spacing[a])));
   const end = perAxis((a) => Math.min(dims[a] - 1, Math.ceil(center[a] + reach / spacing[a])));
@@ -223,33 +346,7 @@ export function paintRandomPhantom(volume: Volume): PaintedPhantom {
   if (w <= 0 || h <= 0 || d <= 0) return { segment, phantom, radiusMm };
   const mask = new Uint8Array(w * h * d);
 
-  for (let k = 0; k < d; k++) {
-    const wz = ((origin[2] + k - center[2]) * spacing[2]) / radiusMm;
-    for (let j = 0; j < h; j++) {
-      const wy = ((origin[1] + j - center[1]) * spacing[1]) / radiusMm;
-      const row = (j + k * h) * w;
-      for (let i = 0; i < w; i++) {
-        const wx = ((origin[0] + i - center[0]) * spacing[0]) / radiusMm;
-        const px = rotation[0][0] * wx + rotation[0][1] * wy + rotation[0][2] * wz;
-        if (Math.abs(px) > halfExtent[0]) continue;
-        const py = rotation[1][0] * wx + rotation[1][1] * wy + rotation[1][2] * wz;
-        if (Math.abs(py) > halfExtent[1]) continue;
-        const pz = rotation[2][0] * wx + rotation[2][1] * wy + rotation[2][2] * wz;
-        if (Math.abs(pz) > halfExtent[2]) continue;
-        const base = phantom.distance([px, py, pz]);
-        if (base > roughness) continue;
-        if (
-          base > -roughness &&
-          base + roughness * fbm(px * grain + seed[0], py * grain + seed[1], pz * grain + seed[2]) >
-            0
-        ) {
-          continue;
-        }
-        mask[row + i] = 1;
-      }
-    }
-  }
-
+  rasterize({ phantom, center, radiusMm, rotation, seed, spacing }, { origin, size, mask });
   segmentation.paintMask(origin, size, mask, segment);
   return { segment, phantom, radiusMm };
 }
