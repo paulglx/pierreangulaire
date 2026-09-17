@@ -1,7 +1,7 @@
 import { type VolumeGeometry, volumeCenter } from './geometry';
 import { add, cross, dot, normalize, scale, sub, type Vec3 } from './math';
 
-export type Orientation = 'axial' | 'coronal' | 'sagittal' | 'acquisition';
+export type Orientation = 'axial' | 'coronal' | 'sagittal';
 
 export interface CameraBasis {
   readonly right: Vec3;
@@ -14,7 +14,7 @@ export interface CanvasPoint {
   readonly y: number;
 }
 
-const PRESET_AXES: Record<Exclude<Orientation, 'acquisition'>, { normal: Vec3; up: Vec3 }> = {
+const PRESET_AXES: Record<Orientation, { normal: Vec3; up: Vec3 }> = {
   axial: { normal: [0, 0, 1], up: [0, -1, 0] },
   coronal: { normal: [0, 1, 0], up: [0, 0, 1] },
   sagittal: { normal: [1, 0, 0], up: [0, 0, 1] },
@@ -54,15 +54,30 @@ function halfExtentAlong(geometry: VolumeGeometry, dir: Vec3): number {
   );
 }
 
+function snapToVolumeAxes(
+  geometry: VolumeGeometry,
+  reference: { normal: Vec3; up: Vec3 },
+): { normal: Vec3; up: Vec3 } {
+  const unclaimed = [...geometry.direction];
+  const claimClosest = (target: Vec3): Vec3 => {
+    let best = 0;
+    for (let i = 1; i < unclaimed.length; i++) {
+      if (Math.abs(dot(unclaimed[i]!, target)) > Math.abs(dot(unclaimed[best]!, target))) best = i;
+    }
+    const [axis] = unclaimed.splice(best, 1) as [Vec3];
+    return dot(axis, target) < 0 ? scale(axis, -1) : axis;
+  };
+  const normal = claimClosest(reference.normal);
+  const up = claimClosest(reference.up);
+  return { normal, up };
+}
+
 export function cameraForOrientation(
   geometry: VolumeGeometry,
   orientation: Orientation,
   aspect: number,
 ): Camera {
-  const axes =
-    orientation === 'acquisition'
-      ? { normal: geometry.direction[2], up: scale(geometry.direction[1], -1) }
-      : PRESET_AXES[orientation];
+  const axes = snapToVolumeAxes(geometry, PRESET_AXES[orientation]);
   const camera = new Camera(axes.normal, axes.up, volumeCenter(geometry), 1);
   fitCamera(camera, geometry, aspect);
   return camera;

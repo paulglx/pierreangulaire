@@ -3,6 +3,7 @@ import { BrickState, BrickStore } from '../src/brick-store';
 import { cameraForOrientation, canvasToWorld, worldToCanvas } from '../src/camera';
 import { type VolumeGeometry, indexToWorld, worldToIndex } from '../src/geometry';
 import { Volume } from '../src/volume';
+import type { Vec3 } from '../src/math';
 
 const identity: VolumeGeometry['direction'] = [
   [1, 0, 0],
@@ -69,6 +70,55 @@ test('axial camera centers the focal point on the canvas', () => {
   const world = canvasToWorld(camera, { x: 128, y: 128 }, 256, 256);
   expect(world[0]).toBeCloseTo(camera.focalPoint[0]);
   expect(world[1]).toBeCloseTo(camera.focalPoint[1]);
+});
+
+function expectVec(actual: Vec3, expected: Vec3): void {
+  for (let i = 0; i < 3; i++) expect(actual[i]).toBeCloseTo(expected[i]!);
+}
+
+test('presets snap to the volume axes closest to the patient axes', () => {
+  const angle = Math.PI / 9;
+  const tilted: VolumeGeometry = {
+    dims: [10, 10, 10],
+    spacing: [1, 1, 1],
+    origin: [0, 0, 0],
+    direction: [
+      [1, 0, 0],
+      [0, Math.cos(angle), Math.sin(angle)],
+      [0, -Math.sin(angle), Math.cos(angle)],
+    ],
+  };
+  const axial = cameraForOrientation(tilted, 'axial', 1);
+  expectVec(axial.normal, tilted.direction[2]);
+  expectVec(axial.up, [0, -Math.cos(angle), -Math.sin(angle)]);
+
+  const coronal = cameraForOrientation(tilted, 'coronal', 1);
+  expectVec(coronal.normal, tilted.direction[1]);
+  expectVec(coronal.up, tilted.direction[2]);
+
+  const sagittal = cameraForOrientation(tilted, 'sagittal', 1);
+  expectVec(sagittal.normal, [1, 0, 0]);
+  expectVec(sagittal.up, tilted.direction[2]);
+});
+
+test('presets flip and permute volume axes to face the patient axes', () => {
+  const flippedAndSwapped: VolumeGeometry = {
+    dims: [10, 10, 10],
+    spacing: [1, 1, 1],
+    origin: [0, 0, 0],
+    direction: [
+      [0, 0, -1],
+      [-1, 0, 0],
+      [0, 1, 0],
+    ],
+  };
+  const axial = cameraForOrientation(flippedAndSwapped, 'axial', 1);
+  expectVec(axial.normal, [0, 0, 1]);
+  expectVec(axial.up, [0, -1, 0]);
+
+  const sagittal = cameraForOrientation(flippedAndSwapped, 'sagittal', 1);
+  expectVec(sagittal.normal, [1, 0, 0]);
+  expectVec(sagittal.up, [0, 0, 1]);
 });
 
 test('int16 store keeps raw voxels in per-brick arrays and exposes exact-size bricks', () => {
