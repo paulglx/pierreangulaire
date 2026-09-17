@@ -1,4 +1,4 @@
-import { type Vec3, type Volume, worldExtent } from 'pierreangulaire';
+import { type Segmentation, type Vec3, type Volume, worldExtent } from 'pierreangulaire';
 
 export interface Phantom {
   readonly name: string;
@@ -13,7 +13,9 @@ type Mat3 = readonly [Vec3, Vec3, Vec3];
 
 const TAU = 2 * Math.PI;
 const CELL = 4;
+const CELL_SIZE: Vec3 = [CELL, CELL, CELL];
 const CULL_MARGIN = 1.25;
+const cellMask = new Uint8Array(CELL * CELL * CELL);
 
 function sphere(x: number, y: number, z: number, radius: number): number {
   return Math.hypot(x, y, z) - radius;
@@ -238,22 +240,28 @@ interface Placement {
   readonly spacing: Vec3;
 }
 
-interface MaskBox {
+interface VoxelBox {
   readonly origin: Vec3;
   readonly size: Vec3;
-  readonly mask: Uint8Array;
 }
 
-function rasterize(placement: Placement, box: MaskBox): void {
+interface Target {
+  readonly segmentation: Segmentation;
+  readonly segment: number;
+}
+
+function rasterize(placement: Placement, box: VoxelBox, target: Target): void {
   const { phantom, center, radiusMm, rotation, seed, spacing } = placement;
   const { halfExtent, roughness, grain } = phantom;
-  const { origin, size, mask } = box;
+  const { origin, size } = box;
+  const { segmentation, segment } = target;
   const [w, h, d] = size;
   const cellHalfDiagonal =
     (Math.hypot(CELL * spacing[0], CELL * spacing[1], CELL * spacing[2]) / 2 / radiusMm) *
     CULL_MARGIN;
   const cullDistance = cellHalfDiagonal + roughness;
   const cullExtent = perAxis((a) => halfExtent[a] + cellHalfDiagonal);
+  const cellCenter = (CELL - 1) / 2;
 
   const step = (axis: 0 | 1 | 2): Vec3 =>
     perAxis((row) => (rotation[row][axis] * spacing[axis]) / radiusMm);
@@ -272,33 +280,36 @@ function rasterize(placement: Placement, box: MaskBox): void {
   const localZ = (i: number, j: number, k: number): number =>
     start[2] + stepI[2] * i + stepJ[2] * j + stepK[2] * k;
 
-  const paintVoxel = (i: number, j: number, k: number): void => {
+  const inside = (i: number, j: number, k: number): boolean => {
     const px = localX(i, j, k);
-    if (Math.abs(px) > halfExtent[0]) return;
+    if (Math.abs(px) > halfExtent[0]) return false;
     const py = localY(i, j, k);
-    if (Math.abs(py) > halfExtent[1]) return;
+    if (Math.abs(py) > halfExtent[1]) return false;
     const pz = localZ(i, j, k);
-    if (Math.abs(pz) > halfExtent[2]) return;
+    if (Math.abs(pz) > halfExtent[2]) return false;
     const base = phantom.distance(px, py, pz);
-    if (base > roughness) return;
-    if (
-      base > -roughness &&
-      base + roughness * fbm(px * grain + seed[0], py * grain + seed[1], pz * grain + seed[2]) > 0
-    ) {
-      return;
-    }
-    mask[i + (j + k * h) * w] = 1;
+    if (base > roughness) return false;
+    if (base <= -roughness) return true;
+    return (
+      base + roughness * fbm(px * grain + seed[0], py * grain + seed[1], pz * grain + seed[2]) <= 0
+    );
+  };
+
+  const paintCell = (ci: number, cj: number, ck: number): void => {
+    segmentation.paintMask(
+      [origin[0] + ci, origin[1] + cj, origin[2] + ck],
+      CELL_SIZE,
+      cellMask,
+      segment,
+    );
   };
 
   for (let ck = 0; ck < d; ck += CELL) {
-    const k1 = Math.min(d, ck + CELL);
-    const mk = (ck + k1 - 1) / 2;
+    const mk = ck + cellCenter;
     for (let cj = 0; cj < h; cj += CELL) {
-      const j1 = Math.min(h, cj + CELL);
-      const mj = (cj + j1 - 1) / 2;
+      const mj = cj + cellCenter;
       for (let ci = 0; ci < w; ci += CELL) {
-        const i1 = Math.min(w, ci + CELL);
-        const mi = (ci + i1 - 1) / 2;
+        const mi = ci + cellCenter;
         const cx = localX(mi, mj, mk);
         if (Math.abs(cx) > cullExtent[0]) continue;
         const cy = localY(mi, mj, mk);
@@ -308,16 +319,22 @@ function rasterize(placement: Placement, box: MaskBox): void {
         const centerDistance = phantom.distance(cx, cy, cz);
         if (centerDistance > cullDistance) continue;
         if (centerDistance < -cullDistance) {
-          for (let k = ck; k < k1; k++) {
-            for (let j = cj; j < j1; j++) mask.fill(1, ci + (j + k * h) * w, i1 + (j + k * h) * w);
-          }
+          cellMask.fill(1);
+          paintCell(ci, cj, ck);
           continue;
         }
-        for (let k = ck; k < k1; k++) {
-          for (let j = cj; j < j1; j++) {
-            for (let i = ci; i < i1; i++) paintVoxel(i, j, k);
+        cellMask.fill(0);
+        let any = false;
+        for (let k = 0; k < CELL; k++) {
+          for (let j = 0; j < CELL; j++) {
+            for (let i = 0; i < CELL; i++) {
+              if (!inside(ci + i, cj + j, ck + k)) continue;
+              cellMask[i + (j + k * CELL) * CELL] = 1;
+              any = true;
+            }
           }
         }
+        if (any) paintCell(ci, cj, ck);
       }
     }
   }
@@ -342,11 +359,12 @@ export function paintRandomPhantom(volume: Volume): PaintedPhantom {
   const origin = perAxis((a) => Math.max(0, Math.floor(center[a] - reach / spacing[a])));
   const end = perAxis((a) => Math.min(dims[a] - 1, Math.ceil(center[a] + reach / spacing[a])));
   const size = perAxis((a) => end[a] - origin[a] + 1);
-  const [w, h, d] = size;
-  if (w <= 0 || h <= 0 || d <= 0) return { segment, phantom, radiusMm };
-  const mask = new Uint8Array(w * h * d);
+  if (size.some((n) => n <= 0)) return { segment, phantom, radiusMm };
 
-  rasterize({ phantom, center, radiusMm, rotation, seed, spacing }, { origin, size, mask });
-  segmentation.paintMask(origin, size, mask, segment);
+  rasterize(
+    { phantom, center, radiusMm, rotation, seed, spacing },
+    { origin, size },
+    { segmentation, segment },
+  );
   return { segment, phantom, radiusMm };
 }

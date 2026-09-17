@@ -111,8 +111,8 @@ export class RenderingEngine {
     for (const volume of this.volumes.values()) {
       const dirty = volume.store.takeDirtyBricks();
       if (dirty.length > 0) this.renderer.uploadBricks(volume, dirty);
-      const segDirty = volume.segmentation.takeDirtyBricks();
-      if (segDirty.length > 0) this.renderer.uploadSegmentationBricks(volume, segDirty);
+      const segDirty = volume.segmentation.takeDirtyRegions();
+      if (segDirty.length > 0) this.renderer.uploadSegmentationRegions(volume, segDirty);
       if (dirty.length === 0 && segDirty.length === 0) continue;
       for (const viewport of this.viewports.values()) {
         if (viewport.volume.id === volume.id) viewport.markDirty();

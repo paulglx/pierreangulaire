@@ -1,3 +1,4 @@
+import type { SegmentationDirtyRegion } from '../segmentation';
 import type { Viewport } from '../viewport';
 import type { Volume } from '../volume';
 
@@ -9,7 +10,7 @@ export interface Renderer {
   onVolumeCreated(volume: Volume): void;
   onVolumeDestroyed(id: string): void;
   uploadBricks(volume: Volume, brickIndices: number[]): void;
-  uploadSegmentationBricks(volume: Volume, brickIndices: number[]): void;
+  uploadSegmentationRegions(volume: Volume, regions: readonly SegmentationDirtyRegion[]): void;
   render(viewports: readonly Viewport[]): void;
   destroy(): void;
 }

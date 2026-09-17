@@ -17,6 +17,14 @@ export interface SegmentationBrickRegion {
   readonly data: Uint16Array;
 }
 
+export interface SegmentationDirtyRegion {
+  readonly brick: number;
+  readonly offset: readonly [number, number, number];
+  readonly size: readonly [number, number, number];
+}
+
+type TouchedBox = [number, number, number, number, number, number];
+
 function hslColor(
   hue: number,
   saturation: number,
@@ -69,7 +77,10 @@ export class Segmentation {
   private readonly styles = new Map<number, LabelStyle>();
   private readonly labels: Float32Array;
   private readonly voxelsPerSegment = new Uint32Array(SEGMENT_COUNT);
-  private readonly dirty = new Set<number>();
+  private readonly slotsPerBrick: Uint32Array;
+  private readonly dirty = new Map<number, TouchedBox>();
+  private lastDirtyBrick = -1;
+  private lastDirtyBox: TouchedBox | null = null;
   private version = 0;
 
   constructor(geometry: VolumeGeometry, brickSize: number) {
@@ -78,6 +89,7 @@ export class Segmentation {
     this.bricksPerAxis = brickGridSize(geometry.dims, brickSize);
     const [nbx, nby, nbz] = this.bricksPerAxis;
     this.bricks = Array.from({ length: nbx * nby * nbz }, () => null);
+    this.slotsPerBrick = new Uint32Array(nbx * nby * nbz);
     this.labels = defaultLabelTable().slice();
   }
 
@@ -170,10 +182,23 @@ export class Segmentation {
     }
   }
 
-  takeDirtyBricks(): number[] {
-    const out = [...this.dirty];
+  takeDirtyRegions(): SegmentationDirtyRegion[] {
+    const out: SegmentationDirtyRegion[] = [];
+    for (const [brick, box] of this.dirty) {
+      out.push({
+        brick,
+        offset: [box[0], box[1], box[2]],
+        size: [box[3] - box[0] + 1, box[4] - box[1] + 1, box[5] - box[2] + 1],
+      });
+    }
     this.dirty.clear();
+    this.lastDirtyBrick = -1;
+    this.lastDirtyBox = null;
     return out;
+  }
+
+  brickOccupied(linearIndex: number): boolean {
+    return this.slotsPerBrick[linearIndex]! > 0;
   }
 
   readBrick(linearIndex: number): SegmentationBrickRegion {
@@ -206,7 +231,10 @@ export class Segmentation {
     const w = Math.min(size, dx - bx * size);
     const h = Math.min(size, dy - by * size);
     const slots = this.bricks[brickIndex] ?? this.allocateBrick(brickIndex);
-    const offset = (i - bx * size + (j - by * size) * w + (k - bz * size) * w * h) * OVERLAP_DEPTH;
+    const li = i - bx * size;
+    const lj = j - by * size;
+    const lk = k - bz * size;
+    const offset = (li + lj * w + lk * w * h) * OVERLAP_DEPTH;
 
     let emptySlot = -1;
     let lowestSlot = 0;
@@ -223,6 +251,7 @@ export class Segmentation {
     }
     if (emptySlot !== -1) {
       slots[offset + emptySlot] = segment;
+      this.slotsPerBrick[brickIndex] = this.slotsPerBrick[brickIndex]! + 1;
     } else if (lowest < segment) {
       this.voxelsPerSegment[lowest] = this.voxelsPerSegment[lowest]! - 1;
       slots[offset + lowestSlot] = segment;
@@ -230,6 +259,25 @@ export class Segmentation {
       return;
     }
     this.voxelsPerSegment[segment] = this.voxelsPerSegment[segment]! + 1;
-    this.dirty.add(brickIndex);
+    this.touch(brickIndex, li, lj, lk);
+  }
+
+  private touch(brickIndex: number, i: number, j: number, k: number): void {
+    let box = this.lastDirtyBox;
+    if (brickIndex !== this.lastDirtyBrick || box === null) {
+      box = this.dirty.get(brickIndex) ?? null;
+      if (box === null) {
+        box = [i, j, k, i, j, k];
+        this.dirty.set(brickIndex, box);
+      }
+      this.lastDirtyBrick = brickIndex;
+      this.lastDirtyBox = box;
+    }
+    if (i < box[0]) box[0] = i;
+    if (j < box[1]) box[1] = j;
+    if (k < box[2]) box[2] = k;
+    if (i > box[3]) box[3] = i;
+    if (j > box[4]) box[4] = j;
+    if (k > box[5]) box[5] = k;
   }
 }

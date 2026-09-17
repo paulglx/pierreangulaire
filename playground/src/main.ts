@@ -431,7 +431,7 @@ async function addRandomSegments(count: number): Promise<void> {
     setStatus('Open a volume before adding segments.');
     return;
   }
-  const frameBudgetMs = 32;
+  const frameBudgetMs = 8;
   let added = 0;
   while (added < count) {
     const frameStart = performance.now();

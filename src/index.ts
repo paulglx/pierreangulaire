@@ -7,7 +7,7 @@ export { Volume, IDENTITY_RESCALE, applyRescale } from './volume';
 export type { Rescale } from './volume';
 
 export { Segmentation, OVERLAP_DEPTH } from './segmentation';
-export type { LabelStyle, SegmentationBrickRegion } from './segmentation';
+export type { LabelStyle, SegmentationBrickRegion, SegmentationDirtyRegion } from './segmentation';
 
 export { Viewport, DebugView } from './viewport';
 

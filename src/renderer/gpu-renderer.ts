@@ -2,6 +2,7 @@ import { bytesPerVoxel, CELL_SIZE } from '../brick-store';
 import type { BlendMode } from '../blend';
 import type { VolumeFormat } from '../geometry';
 import { dot } from '../math';
+import { OVERLAP_DEPTH, type SegmentationDirtyRegion } from '../segmentation';
 import type { DebugView, Viewport } from '../viewport';
 import { applyRescale, type Volume } from '../volume';
 import {
@@ -23,6 +24,7 @@ import type { Renderer } from './renderer';
 
 const UNIFORM_FLOATS = 52;
 const RANGE_FLOATS = 4;
+const SEG_VOXEL_BYTES = OVERLAP_DEPTH * 2;
 const TIMESTAMP_BYTES = 16;
 
 interface VolumeResource {
@@ -359,20 +361,22 @@ export class GPURenderer implements Renderer {
     }
   }
 
-  uploadSegmentationBricks(volume: Volume, brickIndices: number[]): void {
+  uploadSegmentationRegions(volume: Volume, regions: readonly SegmentationDirtyRegion[]): void {
     const resource = this.volumes.get(volume.id);
     if (!resource) return;
     const brickSize = volume.segmentation.brickSize;
     let slotsNeeded = resource.segSlotCount;
-    for (const index of brickIndices) {
-      if (resource.pageData[index] === 0) slotsNeeded++;
+    for (const { brick } of regions) {
+      if (resource.pageData[brick] === 0) slotsNeeded++;
     }
     this.ensureSegAtlasCapacity(resource, brickSize, slotsNeeded);
     const grid = volume.segmentation.bricksPerAxis;
     const changed: number[] = [];
-    for (const index of brickIndices) {
+    for (const region of regions) {
+      const index = region.brick;
       const brick = volume.segmentation.readBrick(index);
-      const [w, h, d] = brick.size;
+      const [w, h] = brick.size;
+      const [ox, oy, oz] = region.offset;
       let slotEntry = resource.pageData[index]!;
       if (slotEntry === 0) {
         slotEntry = packSlotEntry(slotCoord(resource.segSlotCount++));
@@ -383,13 +387,21 @@ export class GPURenderer implements Renderer {
       this.device.queue.writeTexture(
         {
           texture: resource.segAtlas!,
-          origin: { x: slot.x * brickSize, y: slot.y * brickSize, z: slot.z * brickSize },
+          origin: {
+            x: slot.x * brickSize + ox,
+            y: slot.y * brickSize + oy,
+            z: slot.z * brickSize + oz,
+          },
         },
         brick.data,
-        { bytesPerRow: w * 8, rowsPerImage: h },
-        { width: w, height: h, depthOrArrayLayers: d },
+        {
+          offset: (ox + (oy + oz * h) * w) * SEG_VOXEL_BYTES,
+          bytesPerRow: w * SEG_VOXEL_BYTES,
+          rowsPerImage: h,
+        },
+        { width: region.size[0], height: region.size[1], depthOrArrayLayers: region.size[2] },
       );
-      const occupied = hasLabels(brick.data);
+      const occupied = volume.segmentation.brickOccupied(index) ? 1 : 0;
       if (resource.segOccupancy[index] !== occupied) {
         resource.segOccupancy[index] = occupied;
         changed.push(index);
@@ -715,13 +727,6 @@ function brickTexel(grid: readonly [number, number, number], index: number): GPU
     y: Math.floor(index / nbx) % nby,
     z: Math.floor(index / (nbx * nby)),
   };
-}
-
-function hasLabels(data: Uint16Array): number {
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] !== 0) return 1;
-  }
-  return 0;
 }
 
 function brickNeighborhood(grid: readonly [number, number, number], index: number): number[] {

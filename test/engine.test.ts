@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { VolumeGeometry } from '../src/geometry';
 import { RenderingEngine } from '../src/rendering-engine';
 import type { Renderer } from '../src/renderer/renderer';
+import type { SegmentationDirtyRegion } from '../src/segmentation';
 import type { Viewport } from '../src/viewport';
 import type { Volume } from '../src/volume';
 
@@ -25,7 +26,9 @@ function fakeRenderer() {
     onVolumeCreated: vi.fn((_volume: Volume) => {}),
     onVolumeDestroyed: vi.fn((_id: string) => {}),
     uploadBricks: vi.fn((_volume: Volume, _brickIndices: number[]) => {}),
-    uploadSegmentationBricks: vi.fn((_volume: Volume, _brickIndices: number[]) => {}),
+    uploadSegmentationRegions: vi.fn(
+      (_volume: Volume, _regions: readonly SegmentationDirtyRegion[]) => {},
+    ),
     render: vi.fn((_viewports: readonly Viewport[]) => {}),
     destroy: vi.fn(() => {}),
   } satisfies Renderer;
@@ -98,7 +101,9 @@ test('segmentation edits upload dirty bricks and re-render the viewports', async
   volume.segmentation.paintSphere([4, 4, 4], 2, 1);
   frames.at(-1)!(0);
 
-  expect(renderer.uploadSegmentationBricks).toHaveBeenCalledWith(volume, [0]);
+  expect(renderer.uploadSegmentationRegions).toHaveBeenCalledWith(volume, [
+    { brick: 0, offset: [2, 2, 2], size: [5, 5, 5] },
+  ]);
   expect(renderer.uploadBricks).not.toHaveBeenCalled();
   expect(renderer.render).toHaveBeenCalledWith([viewport]);
 });

@@ -14,6 +14,10 @@ const geometry: VolumeGeometry = {
   ],
 };
 
+function dirtyBricks(segmentation: Segmentation): number[] {
+  return segmentation.takeDirtyRegions().map((region) => region.brick);
+}
+
 function slotsAt(segmentation: Segmentation, i: number, j: number, k: number): number[] {
   const brick = segmentation.readBrick(0);
   const [w, h] = brick.size;
@@ -35,8 +39,8 @@ test('paintSphere writes the segment inside the radius and marks bricks dirty', 
   expect(slotsAt(segmentation, 4, 4, 6)).toEqual([1, 0, 0, 0]);
   expect(slotsAt(segmentation, 0, 0, 0)).toEqual([0, 0, 0, 0]);
   expect(segmentation.segmentsPresent()).toEqual([1]);
-  expect(segmentation.takeDirtyBricks()).toEqual([0]);
-  expect(segmentation.takeDirtyBricks()).toEqual([]);
+  expect(dirtyBricks(segmentation)).toEqual([0]);
+  expect(dirtyBricks(segmentation)).toEqual([]);
 });
 
 test('overlapping paints store the full slot set', () => {
@@ -51,11 +55,11 @@ test('overlapping paints store the full slot set', () => {
 test('repainting the same segment does not duplicate slots', () => {
   const segmentation = new Segmentation(geometry, 8);
   segmentation.paintSphere([4, 4, 4], 1, 1);
-  segmentation.takeDirtyBricks();
+  segmentation.takeDirtyRegions();
   segmentation.paintSphere([4, 4, 4], 1, 1);
 
   expect(slotsAt(segmentation, 4, 4, 4)).toEqual([1, 0, 0, 0]);
-  expect(segmentation.takeDirtyBricks()).toEqual([]);
+  expect(dirtyBricks(segmentation)).toEqual([]);
 });
 
 test('a full slot set evicts the lowest index', () => {
@@ -70,12 +74,12 @@ test('a full slot set evicts the lowest index', () => {
 test('a full slot set drops an incoming segment lower than all present', () => {
   const segmentation = new Segmentation(geometry, 8);
   for (const segment of [2, 3, 4, 5]) segmentation.paintSphere([4, 4, 4], 0.1, segment);
-  segmentation.takeDirtyBricks();
+  segmentation.takeDirtyRegions();
   segmentation.paintSphere([4, 4, 4], 0.1, 1);
 
   expect(new Set(slotsAt(segmentation, 4, 4, 4))).toEqual(new Set([2, 3, 4, 5]));
   expect(segmentation.segmentsPresent()).toEqual([2, 3, 4, 5]);
-  expect(segmentation.takeDirtyBricks()).toEqual([]);
+  expect(dirtyBricks(segmentation)).toEqual([]);
 });
 
 test('paintSphere clamps to the volume bounds', () => {
@@ -112,7 +116,7 @@ test('paintMask writes the segment over the nonzero voxels at the given origin',
   expect(slotsAt(segmentation, 4, 5, 6)).toEqual([9, 0, 0, 0]);
   expect(slotsAt(segmentation, 4, 4, 5)).toEqual([0, 0, 0, 0]);
   expect(segmentation.segmentsPresent()).toEqual([9]);
-  expect(segmentation.takeDirtyBricks()).toEqual([0]);
+  expect(dirtyBricks(segmentation)).toEqual([0]);
 });
 
 test('paintMask clips a mask that overhangs the volume', () => {
@@ -175,12 +179,47 @@ test('bricks untouched by any paint read as empty and are never dirty', () => {
 
   const untouched = segmentation.readBrick(7);
   expect(untouched.data.every((slot) => slot === 0)).toBe(true);
-  expect(segmentation.takeDirtyBricks()).toEqual([0]);
+  expect(dirtyBricks(segmentation)).toEqual([0]);
 });
 
 test('dirty bricks span every brick touched by the sphere', () => {
   const segmentation = new Segmentation(geometry, 4);
   segmentation.paintSphere([4, 4, 4], 1.8, 1);
 
-  expect(new Set(segmentation.takeDirtyBricks())).toEqual(new Set([0, 1, 2, 3, 4, 5, 6, 7]));
+  expect(new Set(dirtyBricks(segmentation))).toEqual(new Set([0, 1, 2, 3, 4, 5, 6, 7]));
+});
+
+test('a dirty region is the box of voxels written since the last take', () => {
+  const segmentation = new Segmentation(geometry, 8);
+  const mask = new Uint8Array(2 * 2 * 2);
+  mask[0] = 1;
+  mask[1 + 1 * 2 + 1 * 4] = 1;
+  segmentation.paintMask([3, 4, 5], [2, 2, 2], mask, 9);
+
+  expect(segmentation.takeDirtyRegions()).toEqual([
+    { brick: 0, offset: [3, 4, 5], size: [2, 2, 2] },
+  ]);
+
+  segmentation.paintSphere([1, 1, 1], 0.1, 9);
+  expect(segmentation.takeDirtyRegions()).toEqual([
+    { brick: 0, offset: [1, 1, 1], size: [1, 1, 1] },
+  ]);
+});
+
+test('dirty regions are brick-local and grow across paints within a frame', () => {
+  const segmentation = new Segmentation(geometry, 4);
+  segmentation.paintSphere([5, 5, 5], 0.1, 1);
+  segmentation.paintSphere([7, 6, 5], 0.1, 2);
+
+  expect(segmentation.takeDirtyRegions()).toEqual([
+    { brick: 7, offset: [1, 1, 1], size: [3, 2, 1] },
+  ]);
+});
+
+test('brick occupancy follows the first written slot without scanning voxels', () => {
+  const segmentation = new Segmentation(geometry, 4);
+  expect(segmentation.brickOccupied(0)).toBe(false);
+  segmentation.paintSphere([1, 1, 1], 0.1, 1);
+  expect(segmentation.brickOccupied(0)).toBe(true);
+  expect(segmentation.brickOccupied(7)).toBe(false);
 });
