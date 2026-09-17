@@ -38,6 +38,12 @@ function defaultStyle(segment: number): LabelStyle {
   };
 }
 
+function assertSegment(segment: number): void {
+  if (!Number.isInteger(segment) || segment < 1 || segment >= SEGMENT_COUNT) {
+    throw new Error(`Segment index must be an integer in [1, 65535], got ${segment}.`);
+  }
+}
+
 let sharedDefaultTable: Float32Array | null = null;
 
 function defaultLabelTable(): Float32Array {
@@ -110,9 +116,7 @@ export class Segmentation {
   }
 
   paintSphere(centerWorld: Vec3, radiusMm: number, segment: number): void {
-    if (!Number.isInteger(segment) || segment < 1 || segment >= SEGMENT_COUNT) {
-      throw new Error(`Segment index must be an integer in [1, 65535], got ${segment}.`);
-    }
+    assertSegment(segment);
     const [dx, dy, dz] = this.geometry.dims;
     const [sx, sy, sz] = this.geometry.spacing;
     const center = worldToIndex(this.geometry, centerWorld);
@@ -131,6 +135,36 @@ export class Segmentation {
           const wz = (k - center[2]) * sz;
           if (wx * wx + wy * wy + wz * wz > radiusSq) continue;
           this.addToSlots(i, j, k, segment);
+        }
+      }
+    }
+  }
+
+  paintMask(origin: Vec3, size: Vec3, mask: Uint8Array, segment: number): void {
+    assertSegment(segment);
+    if (!origin.every(Number.isInteger) || !size.every((n) => Number.isInteger(n) && n >= 0)) {
+      throw new Error(
+        `Mask origin and size must be integer voxel counts, got ${origin} / ${size}.`,
+      );
+    }
+    const [w, h, d] = size;
+    if (mask.length !== w * h * d) {
+      throw new Error(`Mask holds ${mask.length} voxels, expected ${w}×${h}×${d}.`);
+    }
+    const [ox, oy, oz] = origin;
+    const [dx, dy, dz] = this.geometry.dims;
+    const i0 = Math.max(0, -ox);
+    const i1 = Math.min(w, dx - ox);
+    const j0 = Math.max(0, -oy);
+    const j1 = Math.min(h, dy - oy);
+    const k0 = Math.max(0, -oz);
+    const k1 = Math.min(d, dz - oz);
+    for (let k = k0; k < k1; k++) {
+      for (let j = j0; j < j1; j++) {
+        const row = (j + k * h) * w;
+        for (let i = i0; i < i1; i++) {
+          if (mask[row + i] === 0) continue;
+          this.addToSlots(ox + i, oy + j, oz + k, segment);
         }
       }
     }

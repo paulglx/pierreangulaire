@@ -2,16 +2,15 @@ import {
   applyRescale,
   BlendMode,
   DebugView,
-  indexToWorld,
   initRenderingEngine,
   type Orientation,
   type Vec3,
   type Viewport,
   type Volume,
   volumeCenter,
-  worldExtent,
 } from 'pierreangulaire';
 import { openSeries, type SeriesStream } from './dicom';
+import { paintRandomPhantom } from './phantoms';
 import './style.css';
 
 const statusEl = document.querySelector<HTMLDivElement>('#status')!;
@@ -19,8 +18,8 @@ const folderInput = document.querySelector<HTMLInputElement>('#folder')!;
 const kebabButton = document.querySelector<HTMLButtonElement>('#kebab')!;
 const globalControlsEl = document.querySelector<HTMLDivElement>('#global-controls')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
-const sphere50Button = document.querySelector<HTMLButtonElement>('#sphere-50')!;
-const sphere1000Button = document.querySelector<HTMLButtonElement>('#sphere-1000')!;
+const segments50Button = document.querySelector<HTMLButtonElement>('#segments-50')!;
+const segments1000Button = document.querySelector<HTMLButtonElement>('#segments-1000')!;
 const antialiasButton = document.querySelector<HTMLButtonElement>('#antialiasing')!;
 const debugViewButton = document.querySelector<HTMLButtonElement>('#debug-view')!;
 
@@ -427,35 +426,23 @@ async function open(files: File[]): Promise<void> {
   setStatus(`${series.description} — ${dx}×${dy}×${dz}`);
 }
 
-function paintRandomSphere(volume: Volume): { segment: number; radius: number } {
-  const segmentation = volume.segmentation;
-  const segment = Math.min(65535, (segmentation.segmentsPresent().at(-1) ?? 0) + 1);
-  const { dims } = volume.geometry;
-  const center = indexToWorld(volume.geometry, [
-    dims[0] * (0.1 + Math.random() * 0.8),
-    dims[1] * (0.1 + Math.random() * 0.8),
-    dims[2] * (0.1 + Math.random() * 0.8),
-  ]);
-  const radius = Math.min(...worldExtent(volume.geometry)) * (0.01 + Math.random() * 0.02);
-  segmentation.paintSphere(center, radius, segment);
-  return { segment, radius };
-}
-
-async function addSphereSegments(count: number): Promise<void> {
+async function addRandomSegments(count: number): Promise<void> {
   if (!activeVolume) {
     setStatus('Open a volume before adding segments.');
     return;
   }
-  const perFrame = Math.ceil(count / 50);
+  const frameBudgetMs = 32;
   let added = 0;
   while (added < count) {
-    let last = { segment: 0, radius: 0 };
-    for (let i = 0; i < perFrame && added < count; i++) {
-      last = paintRandomSphere(activeVolume);
+    const frameStart = performance.now();
+    let last = paintRandomPhantom(activeVolume);
+    added++;
+    while (added < count && performance.now() - frameStart < frameBudgetMs) {
+      last = paintRandomPhantom(activeVolume);
       added++;
     }
     setStatus(
-      `Added segment ${last.segment} — sphere r=${last.radius.toFixed(1)}mm (${added} / ${count})`,
+      `Added segment ${last.segment} — ${last.phantom.name}, ${last.radiusMm.toFixed(1)}mm (${added} / ${count})`,
     );
     await nextFrame();
   }
@@ -495,8 +482,8 @@ function filesFrom(input: HTMLInputElement): File[] {
 folderInput.addEventListener('change', () => void open(filesFrom(folderInput)));
 kebabButton.addEventListener('click', () => setKebab(!kebabEnabled));
 resetButton.addEventListener('click', resetOrientation);
-sphere50Button.addEventListener('click', () => void addSphereSegments(50));
-sphere1000Button.addEventListener('click', () => void addSphereSegments(1000));
+segments50Button.addEventListener('click', () => void addRandomSegments(50));
+segments1000Button.addEventListener('click', () => void addRandomSegments(1000));
 antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnabled));
 debugViewButton.addEventListener('click', cycleDebugView);
 requestAnimationFrame(renderTimeFrame);

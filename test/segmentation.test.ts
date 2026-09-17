@@ -101,6 +101,45 @@ test('paintSphere stores the maximum segment index intact', () => {
   expect(segmentation.segmentsPresent()).toEqual([65535]);
 });
 
+test('paintMask writes the segment over the nonzero voxels at the given origin', () => {
+  const segmentation = new Segmentation(geometry, 8);
+  const mask = new Uint8Array(2 * 2 * 2);
+  mask[0] = 1;
+  mask[1 + 1 * 2 + 1 * 4] = 1;
+  segmentation.paintMask([3, 4, 5], [2, 2, 2], mask, 9);
+
+  expect(slotsAt(segmentation, 3, 4, 5)).toEqual([9, 0, 0, 0]);
+  expect(slotsAt(segmentation, 4, 5, 6)).toEqual([9, 0, 0, 0]);
+  expect(slotsAt(segmentation, 4, 4, 5)).toEqual([0, 0, 0, 0]);
+  expect(segmentation.segmentsPresent()).toEqual([9]);
+  expect(segmentation.takeDirtyBricks()).toEqual([0]);
+});
+
+test('paintMask clips a mask that overhangs the volume', () => {
+  const segmentation = new Segmentation(geometry, 8);
+  const mask = new Uint8Array(4 * 4 * 4).fill(1);
+  segmentation.paintMask([-2, 6, -2], [4, 4, 4], mask, 3);
+
+  expect(slotsAt(segmentation, 0, 6, 0)).toEqual([3, 0, 0, 0]);
+  expect(slotsAt(segmentation, 1, 7, 1)).toEqual([3, 0, 0, 0]);
+  expect(slotsAt(segmentation, 2, 7, 1)).toEqual([0, 0, 0, 0]);
+  expect(slotsAt(segmentation, 1, 5, 1)).toEqual([0, 0, 0, 0]);
+  expect(segmentation.segmentsPresent()).toEqual([3]);
+});
+
+test('paintMask rejects a mask whose length does not match its size', () => {
+  const segmentation = new Segmentation(geometry, 8);
+  expect(() => segmentation.paintMask([0, 0, 0], [2, 2, 2], new Uint8Array(7), 1)).toThrow(
+    /expected 2×2×2/,
+  );
+  expect(() => segmentation.paintMask([0.5, 0, 0], [2, 2, 2], new Uint8Array(8), 1)).toThrow(
+    /integer voxel counts/,
+  );
+  expect(() => segmentation.paintMask([0, 0, 0], [2, 2, 2], new Uint8Array(8), 0)).toThrow(
+    /Segment index/,
+  );
+});
+
 test('label styles default to distinct visible colors and can be edited', () => {
   const segmentation = new Segmentation(geometry, 8);
   const one = segmentation.getLabelStyle(1);
