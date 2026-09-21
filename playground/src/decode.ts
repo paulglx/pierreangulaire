@@ -1,3 +1,5 @@
+import type { Rescale } from 'pierreangulaire';
+
 export interface FrameInfo {
   rows: number;
   columns: number;
@@ -6,6 +8,43 @@ export interface FrameInfo {
 }
 
 export type PixelSamples = Uint8Array | Int8Array | Uint16Array | Int16Array;
+
+export interface SliceSource {
+  file: File;
+  byteOffset: number;
+  byteLength: number;
+  transferSyntax: string;
+  info: FrameInfo;
+  rescale: Rescale;
+}
+
+export interface SliceRequest extends SliceSource {
+  index: number;
+  targetRescale: Rescale;
+}
+
+export interface DecodedSlice {
+  kind: 'slice';
+  index: number;
+  samples: PixelSamples;
+  min: number;
+  max: number;
+}
+
+export interface FailedSlice {
+  kind: 'error';
+  index: number;
+  message: string;
+}
+
+export type SliceResponse = DecodedSlice | FailedSlice;
+
+export const RLE_LOSSLESS = '1.2.840.10008.1.2.5';
+export const JPEG_LOSSLESS = new Set(['1.2.840.10008.1.2.4.57', '1.2.840.10008.1.2.4.70']);
+
+export function bytesPerSample(info: FrameInfo): number {
+  return info.bitsAllocated <= 8 ? 1 : 2;
+}
 
 function allocSamples(info: FrameInfo, length: number): PixelSamples {
   if (info.bitsAllocated <= 8) {
@@ -39,10 +78,10 @@ export function decodeRle(encoded: Uint8Array, info: FrameInfo): PixelSamples {
   const header = new DataView(encoded.buffer, encoded.byteOffset, 64);
   const segmentCount = header.getUint32(0, true);
   const pixelCount = info.rows * info.columns;
-  const bytesPerSample = info.bitsAllocated <= 8 ? 1 : 2;
+  const sampleBytes = bytesPerSample(info);
 
   const planes: Uint8Array[] = [];
-  for (let segment = 0; segment < bytesPerSample; segment++) {
+  for (let segment = 0; segment < sampleBytes; segment++) {
     const start = header.getUint32((segment + 1) * 4, true);
     const end =
       segment + 1 < segmentCount ? header.getUint32((segment + 2) * 4, true) : encoded.length;
@@ -50,7 +89,7 @@ export function decodeRle(encoded: Uint8Array, info: FrameInfo): PixelSamples {
   }
 
   const out = allocSamples(info, pixelCount);
-  if (bytesPerSample === 1) {
+  if (sampleBytes === 1) {
     out.set(planes[0]!);
   } else {
     const high = planes[0]!;
@@ -326,4 +365,79 @@ export function decodeJpegLossless(encoded: Uint8Array, info: FrameInfo): PixelS
   const out = allocSamples(info, width * height);
   for (let i = 0; i < out.length; i++) out[i] = reconstructed[i]! << pointTransform;
   return out;
+}
+
+const ITEM_GROUP = 0xfffe;
+const ITEM_ELEMENT = 0xe000;
+
+function readEncapsulatedFrame(bytes: Uint8Array): Uint8Array {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const fragments: Uint8Array[] = [];
+  let total = 0;
+  let pos = 0;
+  let isOffsetTable = true;
+  while (pos + 8 <= bytes.length) {
+    const group = view.getUint16(pos, true);
+    const element = view.getUint16(pos + 2, true);
+    const length = view.getUint32(pos + 4, true);
+    pos += 8;
+    if (group !== ITEM_GROUP || element !== ITEM_ELEMENT) break;
+    if (!isOffsetTable) {
+      fragments.push(bytes.subarray(pos, pos + length));
+      total += length;
+    }
+    isOffsetTable = false;
+    pos += length;
+  }
+  if (fragments.length === 1) return fragments[0]!;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const fragment of fragments) {
+    out.set(fragment, offset);
+    offset += fragment.length;
+  }
+  return out;
+}
+
+function nativeSamples(bytes: Uint8Array, info: FrameInfo): PixelSamples {
+  const count = info.rows * info.columns;
+  if (info.bitsAllocated <= 8) {
+    return info.signed
+      ? new Int8Array(bytes.buffer, bytes.byteOffset, count)
+      : new Uint8Array(bytes.buffer, bytes.byteOffset, count);
+  }
+  return info.signed
+    ? new Int16Array(bytes.buffer, bytes.byteOffset, count)
+    : new Uint16Array(bytes.buffer, bytes.byteOffset, count);
+}
+
+function alignRescale(raw: PixelSamples, from: Rescale, to: Rescale): PixelSamples {
+  if (from.slope === to.slope && from.intercept === to.intercept) return raw;
+  const aligned = raw.slice();
+  for (let i = 0; i < raw.length; i++) {
+    aligned[i] = Math.round((raw[i]! * from.slope + from.intercept - to.intercept) / to.slope);
+  }
+  return aligned;
+}
+
+export function decodeSliceBytes(buffer: ArrayBuffer, request: SliceRequest): DecodedSlice {
+  const bytes = new Uint8Array(buffer);
+  const { info, transferSyntax } = request;
+  let raw: PixelSamples;
+  if (transferSyntax === RLE_LOSSLESS) {
+    raw = decodeRle(readEncapsulatedFrame(bytes), info);
+  } else if (JPEG_LOSSLESS.has(transferSyntax)) {
+    raw = decodeJpegLossless(readEncapsulatedFrame(bytes), info);
+  } else {
+    raw = nativeSamples(bytes, info);
+  }
+  const samples = alignRescale(raw, request.rescale, request.targetRescale);
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < samples.length; i++) {
+    const value = samples[i]!;
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  return { kind: 'slice', index: request.index, samples, min, max };
 }

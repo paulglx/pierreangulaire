@@ -9,7 +9,7 @@ import {
   type Volume,
   volumeCenter,
 } from 'pierreangulaire';
-import { openSeries, type SeriesStream } from './dicom';
+import { decodeSeries, openSeries, type Series, type SliceLoad } from './dicom';
 import { paintRandomPhantom } from './phantoms';
 import './style.css';
 
@@ -47,6 +47,7 @@ interface ActiveViewport {
 
 let activeViewports: ActiveViewport[] = [];
 let activeVolume: Volume | null = null;
+let activeLoad: SliceLoad | null = null;
 let antialiasEnabled = true;
 let debugViewIndex = 0;
 let blendMode: BlendMode = BlendMode.MIP;
@@ -119,6 +120,23 @@ function setStatus(message: string): void {
 
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+function oncePerFrame(callback: () => void): { request(): void; cancel(): void } {
+  let handle = 0;
+  return {
+    request() {
+      if (handle !== 0) return;
+      handle = requestAnimationFrame(() => {
+        handle = 0;
+        callback();
+      });
+    },
+    cancel() {
+      cancelAnimationFrame(handle);
+      handle = 0;
+    },
+  };
 }
 
 function dotVec(a: Vec3, b: Vec3): number {
@@ -274,6 +292,11 @@ function buildControls(viewport: Viewport, volume: Volume, range: ControlRange):
   panel.append(controls);
 }
 
+function cancelActiveLoad(): void {
+  activeLoad?.cancel();
+  activeLoad = null;
+}
+
 function markAllDirty(): void {
   for (const { viewport } of activeViewports) viewport.markDirty();
 }
@@ -317,31 +340,32 @@ function buildGlobalControls(volume: Volume): void {
 
 async function streamSlices(
   volume: Volume,
-  series: SeriesStream,
+  series: Series,
   onRange: (min: number, max: number) => void,
-): Promise<ControlRange> {
+): Promise<ControlRange | null> {
   let rawMin = Number.POSITIVE_INFINITY;
   let rawMax = Number.NEGATIVE_INFINITY;
+  let loaded = 0;
   const scaled = (): [number, number] => {
     const lo = applyRescale(series.rescale, rawMin);
     const hi = applyRescale(series.rescale, rawMax);
     return [Math.min(lo, hi), Math.max(lo, hi)];
   };
-  for (let k = 0; k < series.sliceCount; k++) {
-    const slice = series.decodeSlice(k);
-    if (!slice) continue;
-    for (let i = 0; i < slice.length; i++) {
-      const value = slice[i]!;
-      if (value < rawMin) rawMin = value;
-      if (value > rawMax) rawMax = value;
-    }
-    volume.writeSlice(k, slice);
-    if (k % 8 === 0) {
-      setStatus(`Loading slice ${k + 1} / ${series.sliceCount}…`);
-      onRange(...scaled());
-      await nextFrame();
-    }
-  }
+  const progress = oncePerFrame(() => {
+    setStatus(`Loading slice ${loaded} / ${series.sliceCount}…`);
+    onRange(...scaled());
+  });
+  const load = decodeSeries(series, ({ index, samples, min, max }) => {
+    if (min < rawMin) rawMin = min;
+    if (max > rawMax) rawMax = max;
+    volume.writeSlice(index, samples);
+    loaded++;
+    progress.request();
+  });
+  activeLoad = load;
+  const completed = await load.done;
+  progress.cancel();
+  if (!completed) return null;
   const [min, max] = scaled();
   onRange(min, max);
   const center = series.hasTaggedWindow ? series.windowCenter : (min + max) / 2;
@@ -351,14 +375,24 @@ async function streamSlices(
 
 async function open(files: File[]): Promise<void> {
   if (files.length === 0) return;
-  setStatus(`Reading ${files.length} files…`);
+  cancelActiveLoad();
 
-  let series: SeriesStream;
+  let parsed = 0;
+  const headerProgress = oncePerFrame(() =>
+    setStatus(`Reading headers ${parsed} / ${files.length}…`),
+  );
+  headerProgress.request();
+  let series: Series;
   try {
-    series = await openSeries(files);
+    series = await openSeries(files, (count) => {
+      parsed = count;
+      headerProgress.request();
+    });
   } catch (error) {
     setStatus(error instanceof Error ? error.message : 'Failed to read DICOM files.');
     return;
+  } finally {
+    headerProgress.cancel();
   }
 
   let engine;
@@ -369,6 +403,7 @@ async function open(files: File[]): Promise<void> {
     return;
   }
 
+  cancelActiveLoad();
   for (const { viewport } of activeViewports) engine.destroyViewport(viewport.id);
   activeViewports = [];
   if (activeVolume) {
@@ -421,7 +456,14 @@ async function open(files: File[]): Promise<void> {
     }
   };
 
-  const range = await streamSlices(volume, series, applyAutoWindow);
+  let range: ControlRange | null;
+  try {
+    range = await streamSlices(volume, series, applyAutoWindow);
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : 'Failed to decode DICOM slices.');
+    return;
+  }
+  if (!range) return;
   for (const { viewport } of activeViewports) buildControls(viewport, volume, range);
   setStatus(`${series.description} — ${dx}×${dy}×${dz}`);
 }

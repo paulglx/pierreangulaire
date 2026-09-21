@@ -1,8 +1,17 @@
 import dicomParser, { type DataSet, type Element } from 'dicom-parser';
 import type { Rescale, Vec3, VolumeFormat, VolumeGeometry } from 'pierreangulaire';
-import { decodeJpegLossless, decodeRle, type FrameInfo, type PixelSamples } from './decode';
+import {
+  bytesPerSample,
+  type DecodedSlice,
+  type FrameInfo,
+  JPEG_LOSSLESS,
+  RLE_LOSSLESS,
+  type SliceRequest,
+  type SliceResponse,
+  type SliceSource,
+} from './decode';
 
-export interface SeriesStream {
+export interface Series {
   geometry: VolumeGeometry;
   format: VolumeFormat;
   rescale: Rescale;
@@ -11,16 +20,30 @@ export interface SeriesStream {
   hasTaggedWindow: boolean;
   description: string;
   sliceCount: number;
-  decodeSlice(index: number): PixelSamples | null;
+  sources: SliceSource[];
 }
 
-interface SliceSource {
-  dataSet: DataSet | undefined;
-  transferSyntax: string;
+export interface SliceLoad {
+  done: Promise<boolean>;
+  cancel(): void;
 }
 
-const RLE_LOSSLESS = '1.2.840.10008.1.2.5';
-const JPEG_LOSSLESS = new Set(['1.2.840.10008.1.2.4.57', '1.2.840.10008.1.2.4.70']);
+interface SliceHeader {
+  source: SliceSource;
+  position: Vec3;
+  orientation: number[];
+  pixelSpacing: number[];
+  sliceThickness: number | undefined;
+  windowCenter: number | undefined;
+  windowWidth: number | undefined;
+  description: string;
+}
+
+const PIXEL_DATA_TAG = 'x7fe00010';
+const HEADER_PROBE_BYTES = 64 * 1024;
+const HEADER_CONCURRENCY = 16;
+const MAX_DECODE_WORKERS = 8;
+const REQUESTS_PER_WORKER = 2;
 const JPEG_FAMILY_PREFIX = '1.2.840.10008.1.2.4';
 const BIG_ENDIAN = '1.2.840.10008.1.2.2';
 
@@ -56,49 +79,6 @@ function vec3From(values: number[], offset: number): Vec3 | null {
   return [x, y, z];
 }
 
-function encodedFrameBytes(dataSet: DataSet, pixelData: Element): Uint8Array {
-  const fragmentCount = pixelData.fragments?.length ?? 0;
-  const bytes = dicomParser.readEncapsulatedPixelDataFromFragments(
-    dataSet,
-    pixelData,
-    0,
-    fragmentCount,
-  );
-  return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-}
-
-function readNativeSamples(dataSet: DataSet, pixelData: Element, info: FrameInfo): PixelSamples {
-  const count = info.rows * info.columns;
-  const bytesPerSample = info.bitsAllocated <= 8 ? 1 : 2;
-  const bytes = dataSet.byteArray.slice(
-    pixelData.dataOffset,
-    pixelData.dataOffset + count * bytesPerSample,
-  );
-  if (info.bitsAllocated <= 8) {
-    return info.signed
-      ? new Int8Array(bytes.buffer, bytes.byteOffset, count)
-      : new Uint8Array(bytes.buffer, bytes.byteOffset, count);
-  }
-  return info.signed
-    ? new Int16Array(bytes.buffer, bytes.byteOffset, count)
-    : new Uint16Array(bytes.buffer, bytes.byteOffset, count);
-}
-
-function decodeSamples(
-  dataSet: DataSet,
-  pixelData: Element,
-  transferSyntax: string,
-  info: FrameInfo,
-): PixelSamples {
-  if (transferSyntax === RLE_LOSSLESS) {
-    return decodeRle(encodedFrameBytes(dataSet, pixelData), info);
-  }
-  if (JPEG_LOSSLESS.has(transferSyntax)) {
-    return decodeJpegLossless(encodedFrameBytes(dataSet, pixelData), info);
-  }
-  return readNativeSamples(dataSet, pixelData, info);
-}
-
 function frameInfo(dataSet: DataSet): FrameInfo | null {
   const rows = dataSet.uint16('x00280010');
   const columns = dataSet.uint16('x00280011');
@@ -123,31 +103,27 @@ function readRescale(dataSet: DataSet): Rescale {
   };
 }
 
-function alignRescale(raw: PixelSamples, from: Rescale, to: Rescale): PixelSamples {
-  if (from.slope === to.slope && from.intercept === to.intercept) return raw;
-  const aligned = raw.slice();
-  for (let i = 0; i < raw.length; i++) {
-    aligned[i] = Math.round((raw[i]! * from.slope + from.intercept - to.intercept) / to.slope);
-  }
-  return aligned;
+function pixelByteLength(pixelData: Element, info: FrameInfo, fileSize: number): number {
+  if (pixelData.hadUndefinedLength) return fileSize - pixelData.dataOffset;
+  return info.rows * info.columns * bytesPerSample(info);
 }
 
-function readPixelSamples(
-  dataSet: DataSet,
-  transferSyntax: string,
-  rescale: Rescale,
-): PixelSamples | null {
-  const pixelData = dataSet.elements['x7fe00010'];
-  const info = frameInfo(dataSet);
-  if (!pixelData || !info) return null;
-  if ((dataSet.uint16('x00280002') ?? 1) !== 1) {
-    throw new Error('Only single-sample grayscale images are supported.');
+async function parseUntilPixelData(blob: Blob): Promise<DataSet | null> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  try {
+    return dicomParser.parseDicom(bytes, { untilTag: PIXEL_DATA_TAG });
+  } catch {
+    return null;
   }
-  const raw = decodeSamples(dataSet, pixelData, transferSyntax, info);
-  return alignRescale(raw, readRescale(dataSet), rescale);
 }
 
-function sliceMetadata(dataSet: DataSet): { position: Vec3; transferSyntax: string } | null {
+async function parseHeader(file: File): Promise<DataSet | null> {
+  const probe = await parseUntilPixelData(file.slice(0, HEADER_PROBE_BYTES));
+  if (probe?.elements[PIXEL_DATA_TAG] || file.size <= HEADER_PROBE_BYTES) return probe;
+  return parseUntilPixelData(file);
+}
+
+function sliceHeader(file: File, dataSet: DataSet): SliceHeader | null {
   const transferSyntax = dataSet.string('x00020010') ?? '';
   if (transferSyntax === BIG_ENDIAN) {
     throw new Error('Big-endian DICOM is not supported by this minimal viewer.');
@@ -157,29 +133,41 @@ function sliceMetadata(dataSet: DataSet): { position: Vec3; transferSyntax: stri
       'This DICOM transfer syntax is not supported. Supported: uncompressed, RLE Lossless, and JPEG Lossless.',
     );
   }
-  const rows = dataSet.uint16('x00280010');
-  const columns = dataSet.uint16('x00280011');
-  const pixelData = dataSet.elements['x7fe00010'];
+  const info = frameInfo(dataSet);
+  const pixelData = dataSet.elements[PIXEL_DATA_TAG];
   const position = vec3From(numbersFromString(dataSet.string('x00200032')), 0);
-  if (!pixelData || !rows || !columns || !position) return null;
+  if (!pixelData || !info || !position) return null;
   if ((dataSet.uint16('x00280002') ?? 1) !== 1) {
     throw new Error('Only single-sample grayscale images are supported.');
   }
-  return { position, transferSyntax };
+  return {
+    source: {
+      file,
+      byteOffset: pixelData.dataOffset,
+      byteLength: pixelByteLength(pixelData, info, file.size),
+      transferSyntax,
+      info,
+      rescale: readRescale(dataSet),
+    },
+    position,
+    orientation: numbersFromString(dataSet.string('x00200037')),
+    pixelSpacing: numbersFromString(dataSet.string('x00280030')),
+    sliceThickness: dataSet.floatString('x00180050'),
+    windowCenter: dataSet.floatString('x00281050'),
+    windowWidth: dataSet.floatString('x00281051'),
+    description: dataSet.string('x0008103e') ?? dataSet.string('x00081030') ?? 'DICOM volume',
+  };
 }
 
-function buildGeometry(reference: DataSet, positions: Vec3[], normal: Vec3): VolumeGeometry {
-  const columns = reference.uint16('x00280011')!;
-  const rows = reference.uint16('x00280010')!;
-  const orientation = numbersFromString(reference.string('x00200037'));
-  const rowDir = normalize(vec3From(orientation, 0) ?? [1, 0, 0]);
-  const columnDir = normalize(vec3From(orientation, 3) ?? [0, 1, 0]);
-  const pixelSpacing = numbersFromString(reference.string('x00280030'));
-  const rowSpacing = pixelSpacing[0] ?? 1;
-  const columnSpacing = pixelSpacing[1] ?? 1;
+function buildGeometry(reference: SliceHeader, positions: Vec3[], normal: Vec3): VolumeGeometry {
+  const { columns, rows } = reference.source.info;
+  const rowDir = normalize(vec3From(reference.orientation, 0) ?? [1, 0, 0]);
+  const columnDir = normalize(vec3From(reference.orientation, 3) ?? [0, 1, 0]);
+  const rowSpacing = reference.pixelSpacing[0] ?? 1;
+  const columnSpacing = reference.pixelSpacing[1] ?? 1;
 
   const first = positions[0]!;
-  let sliceSpacing = reference.floatString('x00180050') ?? 1;
+  let sliceSpacing = reference.sliceThickness ?? 1;
   if (positions.length > 1) {
     const projectionGap = dot(positions[1]!, normal) - dot(first, normal);
     if (Math.abs(projectionGap) > 1e-4) sliceSpacing = Math.abs(projectionGap);
@@ -193,66 +181,128 @@ function buildGeometry(reference: DataSet, positions: Vec3[], normal: Vec3): Vol
   };
 }
 
-export async function openSeries(files: File[]): Promise<SeriesStream> {
-  const entries: { source: SliceSource; position: Vec3 }[] = [];
-  let reference: DataSet | undefined;
-
-  for (const file of files) {
-    let dataSet: DataSet;
-    try {
-      const buffer = await file.arrayBuffer();
-      dataSet = dicomParser.parseDicom(new Uint8Array(buffer));
-    } catch {
-      continue;
+async function forEachConcurrent<T>(
+  items: T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      await task(items[index]!, index);
     }
-    const meta = sliceMetadata(dataSet);
-    if (!meta) continue;
-    entries.push({
-      source: { dataSet, transferSyntax: meta.transferSyntax },
-      position: meta.position,
-    });
-    reference ??= dataSet;
-  }
+  });
+  await Promise.all(lanes);
+}
 
-  if (!reference || entries.length === 0) {
-    throw new Error('No readable DICOM image slices were found.');
-  }
+export async function openSeries(
+  files: File[],
+  onProgress: (parsed: number) => void,
+): Promise<Series> {
+  const headers: (SliceHeader | null)[] = files.map(() => null);
+  let parsed = 0;
+  await forEachConcurrent(files, HEADER_CONCURRENCY, async (file, index) => {
+    const dataSet = await parseHeader(file);
+    parsed++;
+    onProgress(parsed);
+    if (dataSet) headers[index] = sliceHeader(file, dataSet);
+  });
 
-  const orientation = numbersFromString(reference.string('x00200037'));
-  const rowDir = normalize(vec3From(orientation, 0) ?? [1, 0, 0]);
-  const columnDir = normalize(vec3From(orientation, 3) ?? [0, 1, 0]);
+  const slices = headers.filter((header): header is SliceHeader => header !== null);
+  const reference = slices[0];
+  if (!reference) throw new Error('No readable DICOM image slices were found.');
+
+  const rowDir = normalize(vec3From(reference.orientation, 0) ?? [1, 0, 0]);
+  const columnDir = normalize(vec3From(reference.orientation, 3) ?? [0, 1, 0]);
   const normal = normalize(cross(rowDir, columnDir));
+  slices.sort((a, b) => dot(a.position, normal) - dot(b.position, normal));
 
-  entries.sort((a, b) => dot(a.position, normal) - dot(b.position, normal));
-
-  const geometry = buildGeometry(
-    reference,
-    entries.map((entry) => entry.position),
-    normal,
-  );
-  const sources = entries.map((entry) => entry.source);
-
-  const taggedCenter = reference.floatString('x00281050');
-  const taggedWidth = reference.floatString('x00281051');
   const hasTaggedWindow =
-    taggedCenter !== undefined && taggedWidth !== undefined && taggedWidth > 0;
-  const rescale = readRescale(reference);
+    reference.windowCenter !== undefined &&
+    reference.windowWidth !== undefined &&
+    reference.windowWidth > 0;
 
   return {
-    geometry,
-    format: volumeFormat(frameInfo(reference)!),
-    rescale,
-    windowCenter: hasTaggedWindow ? taggedCenter : 0,
-    windowWidth: hasTaggedWindow ? taggedWidth : 1,
+    geometry: buildGeometry(
+      reference,
+      slices.map((slice) => slice.position),
+      normal,
+    ),
+    format: volumeFormat(reference.source.info),
+    rescale: reference.source.rescale,
+    windowCenter: hasTaggedWindow ? reference.windowCenter! : 0,
+    windowWidth: hasTaggedWindow ? reference.windowWidth! : 1,
     hasTaggedWindow,
-    description: reference.string('x0008103e') ?? reference.string('x00081030') ?? 'DICOM volume',
-    sliceCount: sources.length,
-    decodeSlice(index) {
-      const source = sources[index];
-      if (!source?.dataSet) return null;
-      const samples = readPixelSamples(source.dataSet, source.transferSyntax, rescale);
-      source.dataSet = undefined;
-      return samples;
-    },
+    description: reference.description,
+    sliceCount: slices.length,
+    sources: slices.map((slice) => slice.source),
   };
+}
+
+export function decodeSeries(series: Series, onSlice: (slice: DecodedSlice) => void): SliceLoad {
+  const workerCount = Math.max(
+    1,
+    Math.min(navigator.hardwareConcurrency || 4, MAX_DECODE_WORKERS, series.sliceCount),
+  );
+  const workers = Array.from(
+    { length: workerCount },
+    () => new Worker(new URL('./decode-worker.ts', import.meta.url), { type: 'module' }),
+  );
+  let cancel = (): void => {};
+
+  const done = new Promise<boolean>((resolve, reject) => {
+    let next = 0;
+    let finished = 0;
+    let settled = false;
+
+    const settle = (): void => {
+      settled = true;
+      for (const worker of workers) worker.terminate();
+    };
+    const fail = (message: string): void => {
+      if (settled) return;
+      settle();
+      reject(new Error(message));
+    };
+    const dispatch = (worker: Worker): void => {
+      if (next >= series.sliceCount) return;
+      const index = next++;
+      const request: SliceRequest = {
+        ...series.sources[index]!,
+        index,
+        targetRescale: series.rescale,
+      };
+      worker.postMessage(request);
+    };
+
+    for (const worker of workers) {
+      worker.addEventListener('message', (event: MessageEvent<SliceResponse>) => {
+        if (settled) return;
+        const response = event.data;
+        if (response.kind === 'error') {
+          fail(response.message);
+          return;
+        }
+        onSlice(response);
+        finished++;
+        if (finished === series.sliceCount) {
+          settle();
+          resolve(true);
+          return;
+        }
+        dispatch(worker);
+      });
+      worker.addEventListener('error', (event) => fail(event.message || 'Slice decoding failed.'));
+      for (let i = 0; i < REQUESTS_PER_WORKER; i++) dispatch(worker);
+    }
+
+    cancel = () => {
+      if (settled) return;
+      settle();
+      resolve(false);
+    };
+  });
+
+  return { done, cancel: () => cancel() };
 }
