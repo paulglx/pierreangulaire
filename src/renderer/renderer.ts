@@ -9,7 +9,7 @@ export interface Renderer {
   destroyViewport(id: string): void;
   onVolumeCreated(volume: Volume): void;
   onVolumeDestroyed(id: string): void;
-  uploadBricks(volume: Volume, brickIndices: number[]): void;
+  uploadBands(volume: Volume, bands: number[]): void;
   uploadSegmentationRegions(volume: Volume, regions: readonly SegmentationDirtyRegion[]): void;
   render(viewports: readonly Viewport[]): void;
   destroy(): void;

@@ -8,20 +8,25 @@ export type VoxelArray = Int16Array | Uint16Array | Uint8Array | Float32Array;
 
 export const CELL_SIZE = 4;
 
-export interface BrickRegion {
-  readonly origin: readonly [number, number, number];
-  readonly size: readonly [number, number, number];
-  readonly data: VoxelArray;
-  readonly min: number;
-  readonly max: number;
+export interface BandRegion {
+  readonly z: number;
+  readonly slices: readonly VoxelArray[];
   readonly cellGrid: readonly [number, number, number];
   readonly cellRanges: VoxelArray;
+  readonly brickRanges: Float64Array;
 }
 
 export interface BrickBounds {
   readonly origin: readonly [number, number, number];
   readonly size: readonly [number, number, number];
 }
+
+const VOXEL_ARRAYS = {
+  int16: Int16Array,
+  uint16: Uint16Array,
+  uint8: Uint8Array,
+  float32: Float32Array,
+} as const;
 
 export function brickGridSize(dims: Vec3, brickSize: number): readonly [number, number, number] {
   return [
@@ -52,28 +57,11 @@ export function brickBounds(
 }
 
 export function bytesPerVoxel(format: VolumeFormat): number {
-  switch (format) {
-    case 'int16':
-    case 'uint16':
-      return 2;
-    case 'uint8':
-      return 1;
-    case 'float32':
-      return 4;
-  }
+  return VOXEL_ARRAYS[format].BYTES_PER_ELEMENT;
 }
 
 export function createVoxelArray(format: VolumeFormat, count: number): VoxelArray {
-  switch (format) {
-    case 'int16':
-      return new Int16Array(count);
-    case 'uint16':
-      return new Uint16Array(count);
-    case 'uint8':
-      return new Uint8Array(count);
-    case 'float32':
-      return new Float32Array(count);
-  }
+  return new VOXEL_ARRAYS[format](count);
 }
 
 export class BrickStore {
@@ -82,11 +70,10 @@ export class BrickStore {
   readonly brickSize: number;
   readonly bricksPerAxis: readonly [number, number, number];
 
-  private readonly bricks: (VoxelArray | null)[];
+  private readonly slices: (VoxelArray | null)[];
   private readonly states: Uint8Array;
-  private readonly sliceWritten: Uint8Array;
   private readonly bandCount: Int32Array;
-  private readonly dirty = new Set<number>();
+  private readonly dirtyBands = new Set<number>();
 
   constructor(geometry: VolumeGeometry, format: VolumeFormat, brickSize: number) {
     if (brickSize % CELL_SIZE !== 0) {
@@ -95,12 +82,10 @@ export class BrickStore {
     this.geometry = geometry;
     this.format = format;
     this.brickSize = brickSize;
-    const dz = geometry.dims[2];
     this.bricksPerAxis = brickGridSize(geometry.dims, brickSize);
     const brickCount = this.bricksPerAxis[0] * this.bricksPerAxis[1] * this.bricksPerAxis[2];
-    this.bricks = Array.from({ length: brickCount }, () => null);
+    this.slices = Array.from({ length: geometry.dims[2] }, () => null);
     this.states = new Uint8Array(brickCount);
-    this.sliceWritten = new Uint8Array(dz);
     this.bandCount = new Int32Array(this.bricksPerAxis[2]);
   }
 
@@ -113,125 +98,138 @@ export class BrickStore {
   }
 
   isSliceWritten(k: number): boolean {
-    return this.sliceWritten[k] === 1;
+    return this.slices[k] !== null;
   }
 
   writeSlice(k: number, data: ArrayLike<number>): void {
-    const [dx, dy] = this.geometry.dims;
-    const [nbx, nby] = this.bricksPerAxis;
-    const size = this.brickSize;
-    const bz = Math.floor(k / size);
-    const kz = k - bz * size;
-    for (let by = 0; by < nby; by++) {
-      const oy = by * size;
-      const h = Math.min(size, dy - oy);
-      for (let bx = 0; bx < nbx; bx++) {
-        const ox = bx * size;
-        const w = Math.min(size, dx - ox);
-        const index = bx + by * nbx + bz * nbx * nby;
-        const brick = this.bricks[index] ?? this.allocateBrick(index);
-        for (let y = 0; y < h; y++) {
-          const src = ox + (oy + y) * dx;
-          const dst = (kz * h + y) * w;
-          for (let x = 0; x < w; x++) brick[dst + x] = data[src + x]!;
-        }
-      }
+    const [dx, dy, dz] = this.geometry.dims;
+    if (k < 0 || k >= dz) {
+      throw new Error(`Slice ${k} is outside the volume depth ${dz}.`);
     }
-    if (this.sliceWritten[k] === 1) return;
-    this.sliceWritten[k] = 1;
+    if (data.length !== dx * dy) {
+      throw new Error(`Slice ${k} has ${data.length} samples, expected ${dx * dy}.`);
+    }
+    const Type = VOXEL_ARRAYS[this.format];
+    const firstWrite = this.slices[k] === null;
+    this.slices[k] = data instanceof Type ? data : new Type(data);
+    if (!firstWrite) return;
 
+    const bz = Math.floor(k / this.brickSize);
     const previous = this.bandCount[bz]!;
     const current = previous + 1;
     this.bandCount[bz] = current;
     if (previous === 0) this.markBand(bz, BrickState.Loading);
-    if (current === this.bandHeight(bz)) this.markBand(bz, BrickState.Resident);
+    if (current === this.bandDepth(bz)) {
+      this.markBand(bz, BrickState.Resident);
+      this.dirtyBands.add(bz);
+    }
   }
 
-  takeDirtyBricks(): number[] {
-    const out = [...this.dirty];
-    this.dirty.clear();
+  takeDirtyBands(): number[] {
+    const out = [...this.dirtyBands];
+    this.dirtyBands.clear();
     return out;
   }
 
-  readBrick(linearIndex: number): BrickRegion {
-    const { origin, size } = brickBounds(
-      this.geometry.dims,
-      this.brickSize,
-      this.bricksPerAxis,
-      linearIndex,
-    );
-    const [w, h, d] = size;
-    const data = this.bricks[linearIndex] ?? createVoxelArray(this.format, w * h * d);
+  readBand(bz: number): BandRegion {
+    const [dx, dy] = this.geometry.dims;
+    const z = bz * this.brickSize;
+    const depth = this.bandDepth(bz);
+    const slices: VoxelArray[] = [];
+    for (let k = z; k < z + depth; k++) {
+      const slice = this.slices[k];
+      if (!slice) throw new Error(`Band ${bz} is not resident: slice ${k} is missing.`);
+      slices.push(slice);
+    }
     const cellGrid: [number, number, number] = [
-      Math.ceil(w / CELL_SIZE),
-      Math.ceil(h / CELL_SIZE),
-      Math.ceil(d / CELL_SIZE),
+      Math.ceil(dx / CELL_SIZE),
+      Math.ceil(dy / CELL_SIZE),
+      Math.ceil(depth / CELL_SIZE),
     ];
     const [cx, cy, cz] = cellGrid;
-    const cellRanges = createVoxelArray(this.format, cx * cy * cz * 2);
-    let min = Infinity;
-    let max = -Infinity;
-    for (let c = 0; c < cz; c++) {
-      for (let b = 0; b < cy; b++) {
-        for (let a = 0; a < cx; a++) {
-          let lo = Infinity;
-          let hi = -Infinity;
-          for (let z = c * CELL_SIZE; z < Math.min(d, (c + 1) * CELL_SIZE); z++) {
-            for (let y = b * CELL_SIZE; y < Math.min(h, (b + 1) * CELL_SIZE); y++) {
-              const row = (z * h + y) * w;
-              for (let x = a * CELL_SIZE; x < Math.min(w, (a + 1) * CELL_SIZE); x++) {
-                const value = data[row + x]!;
-                if (value < lo) lo = value;
-                if (value > hi) hi = value;
-              }
-            }
-          }
-          const cell = (a + b * cx + c * cx * cy) * 2;
-          cellRanges[cell] = lo;
-          cellRanges[cell + 1] = hi;
-          if (lo < min) min = lo;
-          if (hi > max) max = hi;
+    const lo = new Float64Array(cx * cy * cz).fill(Number.POSITIVE_INFINITY);
+    const hi = new Float64Array(cx * cy * cz).fill(Number.NEGATIVE_INFINITY);
+    const fullCells = Math.floor(dx / CELL_SIZE);
+    for (let s = 0; s < depth; s++) {
+      const slice = slices[s]!;
+      const plane = Math.floor(s / CELL_SIZE) * cx * cy;
+      for (let y = 0; y < dy; y++) {
+        const row = y * dx;
+        const cellRow = plane + Math.floor(y / CELL_SIZE) * cx;
+        for (let c = 0; c < fullCells; c++) {
+          const cell = cellRow + c;
+          const base = row + c * CELL_SIZE;
+          let l = lo[cell]!;
+          let h = hi[cell]!;
+          const v0 = slice[base]!;
+          const v1 = slice[base + 1]!;
+          const v2 = slice[base + 2]!;
+          const v3 = slice[base + 3]!;
+          if (v0 < l) l = v0;
+          if (v0 > h) h = v0;
+          if (v1 < l) l = v1;
+          if (v1 > h) h = v1;
+          if (v2 < l) l = v2;
+          if (v2 > h) h = v2;
+          if (v3 < l) l = v3;
+          if (v3 > h) h = v3;
+          lo[cell] = l;
+          hi[cell] = h;
+        }
+        for (let x = fullCells * CELL_SIZE; x < dx; x++) {
+          const cell = cellRow + fullCells;
+          const value = slice[row + x]!;
+          if (value < lo[cell]!) lo[cell] = value;
+          if (value > hi[cell]!) hi[cell] = value;
         }
       }
     }
-    return { origin, size, data, min, max, cellGrid, cellRanges };
+    const cellRanges = createVoxelArray(this.format, lo.length * 2);
+    for (let cell = 0; cell < lo.length; cell++) {
+      cellRanges[cell * 2] = lo[cell]!;
+      cellRanges[cell * 2 + 1] = hi[cell]!;
+    }
+    const [nbx, nby] = this.bricksPerAxis;
+    const cellsPerBrick = this.brickSize / CELL_SIZE;
+    const brickRanges = new Float64Array(nbx * nby * 2);
+    for (let by = 0; by < nby; by++) {
+      for (let bx = 0; bx < nbx; bx++) {
+        let min = Number.POSITIVE_INFINITY;
+        let max = Number.NEGATIVE_INFINITY;
+        const aEnd = Math.min(cx, (bx + 1) * cellsPerBrick);
+        const bEnd = Math.min(cy, (by + 1) * cellsPerBrick);
+        for (let c = 0; c < cz; c++) {
+          for (let b = by * cellsPerBrick; b < bEnd; b++) {
+            for (let a = bx * cellsPerBrick; a < aEnd; a++) {
+              const cell = a + b * cx + c * cx * cy;
+              if (lo[cell]! < min) min = lo[cell]!;
+              if (hi[cell]! > max) max = hi[cell]!;
+            }
+          }
+        }
+        brickRanges[(bx + by * nbx) * 2] = min;
+        brickRanges[(bx + by * nbx) * 2 + 1] = max;
+      }
+    }
+    return { z, slices, cellGrid, cellRanges, brickRanges };
   }
 
   sampleVoxel(i: number, j: number, k: number): number {
     const [dx, dy, dz] = this.geometry.dims;
     if (i < 0 || j < 0 || k < 0 || i >= dx || j >= dy || k >= dz) return Number.NaN;
-    const size = this.brickSize;
-    const [nbx, nby] = this.bricksPerAxis;
-    const bx = Math.floor(i / size);
-    const by = Math.floor(j / size);
-    const bz = Math.floor(k / size);
-    const brick = this.bricks[bx + by * nbx + bz * nbx * nby];
-    if (!brick) return Number.NaN;
-    const w = Math.min(size, dx - bx * size);
-    const h = Math.min(size, dy - by * size);
-    return brick[i - bx * size + (j - by * size) * w + (k - bz * size) * w * h]!;
+    const slice = this.slices[k];
+    if (!slice) return Number.NaN;
+    return slice[i + j * dx]!;
   }
 
-  private allocateBrick(index: number): VoxelArray {
-    const { size } = brickBounds(this.geometry.dims, this.brickSize, this.bricksPerAxis, index);
-    const brick = createVoxelArray(this.format, size[0] * size[1] * size[2]);
-    this.bricks[index] = brick;
-    return brick;
-  }
-
-  private bandHeight(bz: number): number {
+  private bandDepth(bz: number): number {
     const dz = this.geometry.dims[2];
     return Math.min((bz + 1) * this.brickSize, dz) - bz * this.brickSize;
   }
 
   private markBand(bz: number, state: BrickState): void {
     const [nbx, nby] = this.bricksPerAxis;
-    for (let by = 0; by < nby; by++) {
-      for (let bx = 0; bx < nbx; bx++) {
-        const index = bx + by * nbx + bz * nbx * nby;
-        this.states[index] = state;
-        if (state === BrickState.Resident) this.dirty.add(index);
-      }
-    }
+    const first = bz * nbx * nby;
+    this.states.fill(state, first, first + nbx * nby);
   }
 }

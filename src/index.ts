@@ -41,7 +41,7 @@ export { BlendMode } from './blend';
 export type { WindowLevel } from './blend';
 
 export { BrickStore, BrickState, bytesPerVoxel, CELL_SIZE } from './brick-store';
-export type { BrickRegion, VoxelArray } from './brick-store';
+export type { BandRegion, VoxelArray } from './brick-store';
 
 export { indexToWorld, worldToIndex, volumeCenter, worldExtent, voxelCount } from './geometry';
 export type { VolumeGeometry, VolumeFormat } from './geometry';

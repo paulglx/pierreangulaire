@@ -322,42 +322,59 @@ export class GPURenderer implements Renderer {
     }
   }
 
-  uploadBricks(volume: Volume, brickIndices: number[]): void {
+  uploadBands(volume: Volume, bands: number[]): void {
     const resource = this.volumes.get(volume.id);
     if (!resource) return;
-    const { bricksPerAxis } = volume.store;
-    const rowBytes = bytesPerVoxel(volume.format);
-    const dx = volume.geometry.dims[0];
-    for (const index of brickIndices) {
-      const brick = volume.store.readBrick(index);
-      const [w, h, d] = brick.size;
-      const [x, y, z] = brick.origin;
-      this.device.queue.writeTexture(
-        { texture: resource.pool, origin: tiledOrigin(brick.origin, resource.tileDepth, dx) },
-        brick.data,
-        { bytesPerRow: w * rowBytes, rowsPerImage: h },
-        { width: w, height: h, depthOrArrayLayers: d },
-      );
-      const [cx, cy, cz] = brick.cellGrid;
+    const [nbx, nby] = volume.store.bricksPerAxis;
+    const texelBytes = bytesPerVoxel(volume.format);
+    const [dx, dy] = volume.geometry.dims;
+    const cellWidth = Math.ceil(dx / CELL_SIZE);
+    for (const bz of bands) {
+      const band = volume.store.readBand(bz);
+      for (let s = 0; s < band.slices.length; s++) {
+        this.device.queue.writeTexture(
+          {
+            texture: resource.pool,
+            origin: tiledOrigin([0, 0, band.z + s], resource.tileDepth, dx),
+          },
+          band.slices[s]!,
+          { bytesPerRow: dx * texelBytes, rowsPerImage: dy },
+          { width: dx, height: dy, depthOrArrayLayers: 1 },
+        );
+      }
+      const [cx, cy, cz] = band.cellGrid;
       this.device.queue.writeTexture(
         {
           texture: resource.cellTexture,
           origin: tiledOrigin(
-            [x / CELL_SIZE, y / CELL_SIZE, z / CELL_SIZE],
+            [0, 0, band.z / CELL_SIZE],
             resource.tileDepth / CELL_SIZE,
-            Math.ceil(dx / CELL_SIZE),
+            cellWidth,
           ),
         },
-        brick.cellRanges,
-        { bytesPerRow: cx * rowBytes * 2, rowsPerImage: cy },
+        band.cellRanges,
+        { bytesPerRow: cx * texelBytes * 2, rowsPerImage: cy },
         { width: cx, height: cy, depthOrArrayLayers: cz },
       );
-      const lo = applyRescale(volume.rescale, brick.min);
-      const hi = applyRescale(volume.rescale, brick.max);
-      resource.rangeData[index * RANGE_FLOATS] = Math.min(lo, hi);
-      resource.rangeData[index * RANGE_FLOATS + 1] = Math.max(lo, hi);
-      resource.rangeData[index * RANGE_FLOATS + 3] = 1;
-      this.writeRangeTexel(resource, bricksPerAxis, index);
+      const firstBrick = bz * nbx * nby;
+      for (let b = 0; b < nbx * nby; b++) {
+        const lo = applyRescale(volume.rescale, band.brickRanges[b * 2]!);
+        const hi = applyRescale(volume.rescale, band.brickRanges[b * 2 + 1]!);
+        const texel = (firstBrick + b) * RANGE_FLOATS;
+        resource.rangeData[texel] = Math.min(lo, hi);
+        resource.rangeData[texel + 1] = Math.max(lo, hi);
+        resource.rangeData[texel + 3] = 1;
+      }
+      this.device.queue.writeTexture(
+        { texture: resource.rangeTexture, origin: { x: 0, y: 0, z: bz } },
+        resource.rangeData,
+        {
+          offset: firstBrick * RANGE_FLOATS * 4,
+          bytesPerRow: nbx * RANGE_FLOATS * 4,
+          rowsPerImage: nby,
+        },
+        { width: nbx, height: nby, depthOrArrayLayers: 1 },
+      );
     }
   }
 

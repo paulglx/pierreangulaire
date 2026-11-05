@@ -111,10 +111,10 @@ export class RenderingEngine {
     for (const viewport of targets) viewport.dirty = false;
   }
 
-  private uploadDirtyBricks(): void {
+  private uploadDirtyVoxels(): void {
     for (const volume of this.volumes.values()) {
-      const dirty = volume.store.takeDirtyBricks();
-      if (dirty.length > 0) this.renderer.uploadBricks(volume, dirty);
+      const dirty = volume.store.takeDirtyBands();
+      if (dirty.length > 0) this.renderer.uploadBands(volume, dirty);
       const segDirty = volume.segmentation.takeDirtyRegions();
       if (segDirty.length > 0) this.renderer.uploadSegmentationRegions(volume, segDirty);
       if (dirty.length === 0 && segDirty.length === 0) continue;
@@ -144,7 +144,7 @@ export class RenderingEngine {
   private startLoop(): void {
     const frame = (): void => {
       if (this.destroyed) return;
-      this.uploadDirtyBricks();
+      this.uploadDirtyVoxels();
       this.render();
       this.rafHandle = requestAnimationFrame(frame);
     };

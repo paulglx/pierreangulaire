@@ -25,7 +25,7 @@ function fakeRenderer() {
     destroyViewport: vi.fn((_id: string) => {}),
     onVolumeCreated: vi.fn((_volume: Volume) => {}),
     onVolumeDestroyed: vi.fn((_id: string) => {}),
-    uploadBricks: vi.fn((_volume: Volume, _brickIndices: number[]) => {}),
+    uploadBands: vi.fn((_volume: Volume, _bands: number[]) => {}),
     uploadSegmentationRegions: vi.fn(
       (_volume: Volume, _regions: readonly SegmentationDirtyRegion[]) => {},
     ),
@@ -111,7 +111,7 @@ test('segmentation edits upload dirty bricks and re-render the viewports', async
   expect(renderer.uploadSegmentationRegions).toHaveBeenCalledWith(volume, [
     { brick: 0, offset: [2, 2, 2], size: [5, 5, 5] },
   ]);
-  expect(renderer.uploadBricks).not.toHaveBeenCalled();
+  expect(renderer.uploadBands).not.toHaveBeenCalled();
   expect(renderer.render).toHaveBeenCalledWith([viewport]);
 });
 
