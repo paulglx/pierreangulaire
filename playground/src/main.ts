@@ -487,7 +487,7 @@ async function open(files: File[]): Promise<void> {
   }
   if (!range) return;
   for (const { viewport } of activeViewports) buildControls(viewport, range);
-  setStatus(`${series.description} — ${dx}×${dy}×${dz}`);
+  setStatus(`${series.description} ${dx}×${dy}×${dz}`);
 }
 
 async function addRandomSegments(count: number): Promise<void> {
