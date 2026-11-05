@@ -2,6 +2,7 @@ import {
   applyRescale,
   type Binding,
   BlendMode,
+  cameraForOrientation,
   DebugView,
   initRenderingEngine,
   type Orientation,
@@ -99,7 +100,6 @@ function kebabFrame(now: number): void {
     viewport.camera.normal = rotateAroundAxis(baseNormal, baseUp, kebabAngle);
     viewport.markDirty();
   }
-  syncResetButton();
   kebabRaf = requestAnimationFrame(kebabFrame);
 }
 
@@ -116,34 +116,13 @@ function setKebab(enabled: boolean): void {
   }
 }
 
-function vec3Near(a: Vec3, b: Vec3): boolean {
-  return (
-    Math.abs(a[0] - b[0]) < 1e-4 && Math.abs(a[1] - b[1]) < 1e-4 && Math.abs(a[2] - b[2]) < 1e-4
-  );
-}
-
-function orientationAligned({ viewport, baseNormal, baseUp }: ActiveViewport): boolean {
-  const { normal, up } = viewport.camera;
-  return vec3Near(normal, baseNormal) && vec3Near(up, baseUp);
-}
-
-function syncResetButton(): void {
-  const misaligned = activeViewports.some((entry) => !orientationAligned(entry));
-  resetButton.classList.toggle('hidden', !misaligned);
-}
-
-function resetOrientation(): void {
+function resetCameras(): void {
   setKebab(false);
-  const misaligned = activeViewports.filter((entry) => !orientationAligned(entry));
-  for (const entry of misaligned) {
-    entry.viewport.camera.normal = entry.baseNormal;
-    entry.viewport.camera.up = entry.baseUp;
-    entry.viewport.markDirty();
+  kebabAngle = 0;
+  for (const { viewport, orientation } of activeViewports) {
+    const aspect = viewport.canvas.width / viewport.canvas.height;
+    viewport.setCamera(cameraForOrientation(viewport.volume.geometry, orientation, aspect));
   }
-  if (misaligned.length > 0) {
-    setStatus(`Reset orientation — ${misaligned.map((entry) => entry.orientation).join(', ')}.`);
-  }
-  syncResetButton();
 }
 
 function applyToolBindings(engine: RenderingEngine): void {
@@ -461,7 +440,6 @@ async function open(files: File[]): Promise<void> {
     });
     observer.observe(canvas);
   }
-  syncResetButton();
   buildGlobalControls(volume);
 
   const applyAutoWindow = (min: number, max: number): void => {
@@ -526,7 +504,6 @@ function cycleDebugView(): void {
 }
 
 function renderTimeFrame(): void {
-  syncResetButton();
   for (const { viewport } of activeViewports) {
     const label = document.querySelector<HTMLSpanElement>(`#${viewport.id}-time`);
     if (!label) continue;
@@ -542,7 +519,7 @@ function filesFrom(input: HTMLInputElement): File[] {
 
 folderInput.addEventListener('change', () => void open(filesFrom(folderInput)));
 kebabButton.addEventListener('click', () => setKebab(!kebabEnabled));
-resetButton.addEventListener('click', resetOrientation);
+resetButton.addEventListener('click', resetCameras);
 segments50Button.addEventListener('click', () => void addRandomSegments(50));
 segments1000Button.addEventListener('click', () => void addRandomSegments(1000));
 antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnabled));
