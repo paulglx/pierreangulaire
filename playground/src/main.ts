@@ -16,6 +16,23 @@ import {
   type Volume,
   ZoomTool,
 } from 'pierreangulaire';
+import {
+  Bug,
+  CopyPlus,
+  createElement,
+  Flame,
+  FolderOpen,
+  Grid3x3,
+  House,
+  type IconNode,
+  Layers,
+  Move,
+  Orbit,
+  Rotate3d,
+  Spline,
+  SquarePlus,
+  ZoomIn,
+} from 'lucide';
 import { decodeSeries, openSeries, type Series, type SliceLoad } from './dicom';
 import { paintRandomPhantom } from './phantoms';
 import './style.css';
@@ -40,32 +57,44 @@ const PANELS: { id: string; orientation: Orientation }[] = [
 ];
 
 const BLEND_NAMES = ['MIP', 'MinIP', 'Average', 'Composite'];
-const DEBUG_VIEWS: { view: DebugView; name: string }[] = [
-  { view: DebugView.None, name: 'off' },
-  { view: DebugView.EmptyBlocks, name: 'empty blocks' },
-  { view: DebugView.FetchHeatmap, name: 'fetch heatmap' },
+const DEBUG_VIEWS: { view: DebugView; name: string; icon: IconNode }[] = [
+  { view: DebugView.None, name: 'off', icon: Bug },
+  { view: DebugView.EmptyBlocks, name: 'empty blocks', icon: Grid3x3 },
+  { view: DebugView.FetchHeatmap, name: 'fetch heatmap', icon: Flame },
 ];
 
 interface CameraToolEntry {
   label: string;
+  icon: IconNode;
   tool: Tool;
   bindings: Binding[];
 }
 
 const CAMERA_TOOLS: CameraToolEntry[] = [
-  { label: 'Pan', tool: new PanTool(), bindings: [{ button: 'auxiliary' }] },
+  { label: 'Pan', icon: Move, tool: new PanTool(), bindings: [{ button: 'auxiliary' }] },
   {
     label: 'Zoom',
+    icon: ZoomIn,
     tool: new ZoomTool(),
     bindings: [{ button: 'secondary' }, { wheel: true, modifiers: ['ctrl'] }],
   },
   {
     label: 'Scroll',
+    icon: Layers,
     tool: new SlabScrollTool(),
     bindings: [{ wheel: true }, { key: 'ArrowUp', steps: -1 }, { key: 'ArrowDown', steps: 1 }],
   },
-  { label: 'Rotate', tool: new RotateTool(), bindings: [] },
+  { label: 'Rotate', icon: Rotate3d, tool: new RotateTool(), bindings: [] },
 ];
+
+function setIcon(element: HTMLElement, icon: IconNode): void {
+  element.replaceChildren(createElement(icon, { class: 'block size-4' }));
+}
+
+function setActive(element: HTMLElement, active: boolean): void {
+  element.classList.toggle('text-stone-50', active);
+  element.classList.toggle('text-stone-400', !active);
+}
 
 let primaryToolIndex = 2;
 let toolEngine: RenderingEngine | null = null;
@@ -105,9 +134,8 @@ function kebabFrame(now: number): void {
 
 function setKebab(enabled: boolean): void {
   kebabEnabled = enabled;
-  kebabButton.textContent = `Kebab mode: ${enabled ? 'on' : 'off'}`;
-  kebabButton.classList.toggle('text-stone-50', enabled);
-  kebabButton.classList.toggle('text-stone-400', !enabled);
+  kebabButton.title = `Kebab mode: ${enabled ? 'on' : 'off'}`;
+  setActive(kebabButton, enabled);
   if (enabled) {
     kebabLast = 0;
     kebabRaf = requestAnimationFrame(kebabFrame);
@@ -136,19 +164,17 @@ function applyToolBindings(engine: RenderingEngine): void {
 
 function selectPrimaryTool(index: number): void {
   primaryToolIndex = index;
-  primaryToolButtons.forEach((button, buttonIndex) => {
-    button.classList.toggle('text-stone-50', buttonIndex === index);
-    button.classList.toggle('text-stone-400', buttonIndex !== index);
-  });
+  primaryToolButtons.forEach((button, buttonIndex) => setActive(button, buttonIndex === index));
   if (toolEngine) applyToolBindings(toolEngine);
 }
 
 function buildPrimaryToolButtons(): void {
-  CAMERA_TOOLS.forEach(({ label }, index) => {
+  CAMERA_TOOLS.forEach(({ label, icon }, index) => {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'cursor-pointer hover:underline';
-    button.textContent = label;
+    button.className = 'cursor-pointer rounded p-1 hover:bg-stone-800';
+    button.title = label;
+    setIcon(button, icon);
     button.addEventListener('click', () => selectPrimaryTool(index));
     primaryToolButtons.push(button);
     primaryToolsEl.append(button);
@@ -488,18 +514,22 @@ async function addRandomSegments(count: number): Promise<void> {
 
 function setAntialiasing(enabled: boolean): void {
   antialiasEnabled = enabled;
-  antialiasButton.textContent = `Antialiasing: ${enabled ? 'on' : 'off'}`;
-  antialiasButton.classList.toggle('text-stone-50', enabled);
-  antialiasButton.classList.toggle('text-stone-400', !enabled);
+  antialiasButton.title = `Antialiasing: ${enabled ? 'on' : 'off'}`;
+  setActive(antialiasButton, enabled);
   for (const { viewport } of activeViewports) viewport.setSegmentationAntialiasing(enabled);
+}
+
+function showDebugView(): void {
+  const { view, name, icon } = DEBUG_VIEWS[debugViewIndex]!;
+  debugViewButton.title = `Debug: ${name}`;
+  setIcon(debugViewButton, icon);
+  setActive(debugViewButton, view !== DebugView.None);
 }
 
 function cycleDebugView(): void {
   debugViewIndex = (debugViewIndex + 1) % DEBUG_VIEWS.length;
-  const { view, name } = DEBUG_VIEWS[debugViewIndex]!;
-  debugViewButton.textContent = `Debug: ${name}`;
-  debugViewButton.classList.toggle('text-stone-50', view !== DebugView.None);
-  debugViewButton.classList.toggle('text-stone-400', view === DebugView.None);
+  showDebugView();
+  const { view } = DEBUG_VIEWS[debugViewIndex]!;
   for (const { viewport } of activeViewports) viewport.setDebugView(view);
 }
 
@@ -524,6 +554,15 @@ segments50Button.addEventListener('click', () => void addRandomSegments(50));
 segments1000Button.addEventListener('click', () => void addRandomSegments(1000));
 antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnabled));
 debugViewButton.addEventListener('click', cycleDebugView);
+folderInput.before(createElement(FolderOpen, { class: 'block size-4' }));
+setIcon(kebabButton, Orbit);
+setIcon(resetButton, House);
+setIcon(segments50Button, SquarePlus);
+setIcon(segments1000Button, CopyPlus);
+setIcon(antialiasButton, Spline);
+setKebab(false);
+setAntialiasing(true);
+showDebugView();
 buildPrimaryToolButtons();
 selectPrimaryTool(primaryToolIndex);
 requestAnimationFrame(renderTimeFrame);

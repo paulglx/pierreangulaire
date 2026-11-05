@@ -10,6 +10,7 @@
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "dicom-parser": "^1.8.21",
+    "lucide": "^1.64.0",
     "pierreangulaire": "workspace:*"
   },
   "devDependencies": {

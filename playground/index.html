@@ -8,42 +8,55 @@
   <body class="flex h-full flex-col bg-stone-950 font-mono text-xs leading-snug text-stone-50">
     <header class="flex flex-wrap items-center gap-4 px-4 py-3">
       <h1 class="m-0 font-normal text-stone-400">pierreangulaire · playground</h1>
-      <label class="cursor-pointer hover:underline">
-        Open DICOM folder
+      <label
+        id="folder-label"
+        class="cursor-pointer rounded p-1 text-stone-400 hover:bg-stone-800"
+        title="Open DICOM folder"
+      >
         <input id="folder" class="hidden" type="file" webkitdirectory multiple />
       </label>
-      <div id="primary-tools" class="flex items-center gap-2">
+      <div id="primary-tools" class="flex items-center gap-1">
         <span class="text-stone-400">Left click:</span>
       </div>
-      <button id="kebab" class="cursor-pointer text-stone-400 hover:underline" type="button">
-        Kebab mode: off
-      </button>
-      <button id="reset" class="cursor-pointer text-stone-400 hover:underline" type="button">
-        Reset cameras
-      </button>
-      <div class="flex items-center gap-2">
+      <button
+        id="kebab"
+        class="cursor-pointer rounded p-1 text-stone-400 hover:bg-stone-800"
+        type="button"
+        title="Kebab mode"
+      ></button>
+      <button
+        id="reset"
+        class="cursor-pointer rounded p-1 text-stone-400 hover:bg-stone-800"
+        type="button"
+        title="Reset cameras"
+      ></button>
+      <div class="flex items-center gap-1">
         <span class="text-stone-400">Segments:</span>
         <button
           id="segments-50"
-          class="cursor-pointer text-stone-400 hover:underline"
+          class="cursor-pointer rounded p-1 text-stone-400 hover:bg-stone-800"
           type="button"
-        >
-          +50
-        </button>
+          title="Add 50 segments"
+        ></button>
         <button
           id="segments-1000"
-          class="cursor-pointer text-stone-400 hover:underline"
+          class="cursor-pointer rounded p-1 text-stone-400 hover:bg-stone-800"
           type="button"
-        >
-          +1000
-        </button>
+          title="Add 1000 segments"
+        ></button>
       </div>
-      <button id="antialiasing" class="cursor-pointer text-stone-50 hover:underline" type="button">
-        Antialiasing: on
-      </button>
-      <button id="debug-view" class="cursor-pointer text-stone-400 hover:underline" type="button">
-        Debug: off
-      </button>
+      <button
+        id="antialiasing"
+        class="cursor-pointer rounded p-1 text-stone-400 hover:bg-stone-800"
+        type="button"
+        title="Antialiasing"
+      ></button>
+      <button
+        id="debug-view"
+        class="cursor-pointer rounded p-1 text-stone-400 hover:bg-stone-800"
+        type="button"
+        title="Debug view"
+      ></button>
       <div id="global-controls" class="flex items-center gap-4"></div>
       <div id="status" class="ml-auto text-stone-400 tabular-nums">
         Select a folder of DICOM files representing one volume.
