@@ -1,5 +1,5 @@
 import { type VolumeGeometry, volumeCenter } from './geometry';
-import { add, cross, dot, normalize, scale, sub, type Vec3 } from './math';
+import { add, cross, dot, normalize, rotate, scale, sub, type Vec3 } from './math';
 
 export type Orientation = 'axial' | 'coronal' | 'sagittal';
 
@@ -43,6 +43,74 @@ export class Camera {
   scrollSlab(deltaMm: number): void {
     this.focalPoint = add(this.focalPoint, scale(normalize(this.normal), deltaMm));
   }
+
+  pan(deltaWorld: Vec3): void {
+    this.focalPoint = add(this.focalPoint, deltaWorld);
+  }
+
+  zoomAt(factor: number, anchor: Vec3): void {
+    const normal = normalize(this.normal);
+    const offset = sub(anchor, this.focalPoint);
+    const inPlaneOffset = sub(offset, scale(normal, dot(offset, normal)));
+    this.focalPoint = add(this.focalPoint, scale(inPlaneOffset, 1 - factor));
+    this.zoom *= factor;
+  }
+
+  rotateAround(pivot: Vec3, axis: Vec3, angle: number): void {
+    this.normal = normalize(rotate(this.normal, axis, angle));
+    this.up = normalize(rotate(this.up, axis, angle));
+    this.focalPoint = add(pivot, rotate(sub(this.focalPoint, pivot), axis, angle));
+  }
+}
+
+export function sliceSpacing(geometry: VolumeGeometry, normal: Vec3): number {
+  let best = 0;
+  for (let axis = 1; axis < 3; axis++) {
+    if (
+      Math.abs(dot(geometry.direction[axis]!, normal)) >
+      Math.abs(dot(geometry.direction[best]!, normal))
+    ) {
+      best = axis;
+    }
+  }
+  return geometry.spacing[best]! / Math.abs(dot(geometry.direction[best]!, normal));
+}
+
+export interface SliceRange {
+  readonly spacing: number;
+  readonly first: number;
+  readonly last: number;
+}
+
+export function sliceRange(geometry: VolumeGeometry, normal: Vec3): SliceRange {
+  const spacing = sliceSpacing(geometry, normal);
+  let minDepth = 0;
+  let maxDepth = 0;
+  for (let axis = 0; axis < 3; axis++) {
+    const span =
+      (geometry.dims[axis]! - 1) * geometry.spacing[axis]! * dot(geometry.direction[axis]!, normal);
+    if (span < 0) minDepth += span;
+    else maxDepth += span;
+  }
+  return {
+    spacing,
+    first: Math.ceil(minDepth / spacing - 1e-6),
+    last: Math.floor(maxDepth / spacing + 1e-6),
+  };
+}
+
+export function sliceIndex(camera: Camera, geometry: VolumeGeometry): number {
+  const { normal } = camera.basis();
+  const depth = dot(sub(camera.focalPoint, geometry.origin), normal);
+  return Math.round(depth / sliceSpacing(geometry, normal));
+}
+
+export function scrollSlices(camera: Camera, geometry: VolumeGeometry, count: number): void {
+  const { normal } = camera.basis();
+  const { spacing, first, last } = sliceRange(geometry, normal);
+  const target = Math.min(last, Math.max(first, sliceIndex(camera, geometry) + count));
+  const depth = dot(sub(camera.focalPoint, geometry.origin), normal);
+  camera.focalPoint = add(camera.focalPoint, scale(normal, target * spacing - depth));
 }
 
 function halfExtentAlong(geometry: VolumeGeometry, dir: Vec3): number {

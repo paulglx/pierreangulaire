@@ -1,13 +1,20 @@
 import {
   applyRescale,
+  type Binding,
   BlendMode,
   DebugView,
   initRenderingEngine,
   type Orientation,
+  PanTool,
+  type RenderingEngine,
+  RotateTool,
+  SlabScrollTool,
+  type Tool,
   type Vec3,
   type Viewport,
   type Volume,
   volumeCenter,
+  ZoomTool,
 } from 'pierreangulaire';
 import { decodeSeries, openSeries, type Series, type SliceLoad } from './dicom';
 import { paintRandomPhantom } from './phantoms';
@@ -22,6 +29,7 @@ const segments50Button = document.querySelector<HTMLButtonElement>('#segments-50
 const segments1000Button = document.querySelector<HTMLButtonElement>('#segments-1000')!;
 const antialiasButton = document.querySelector<HTMLButtonElement>('#antialiasing')!;
 const debugViewButton = document.querySelector<HTMLButtonElement>('#debug-view')!;
+const primaryToolsEl = document.querySelector<HTMLDivElement>('#primary-tools')!;
 
 const KEBAB_RAD_PER_SEC = (2 * Math.PI) / 24;
 
@@ -37,6 +45,31 @@ const DEBUG_VIEWS: { view: DebugView; name: string }[] = [
   { view: DebugView.EmptyBlocks, name: 'empty blocks' },
   { view: DebugView.FetchHeatmap, name: 'fetch heatmap' },
 ];
+
+interface CameraToolEntry {
+  label: string;
+  tool: Tool;
+  bindings: Binding[];
+}
+
+const CAMERA_TOOLS: CameraToolEntry[] = [
+  { label: 'Pan', tool: new PanTool(), bindings: [{ button: 'auxiliary' }] },
+  {
+    label: 'Zoom',
+    tool: new ZoomTool(),
+    bindings: [{ button: 'secondary' }, { wheel: true, modifiers: ['ctrl'] }],
+  },
+  {
+    label: 'Scroll',
+    tool: new SlabScrollTool(),
+    bindings: [{ wheel: true }, { key: 'ArrowUp', steps: -1 }, { key: 'ArrowDown', steps: 1 }],
+  },
+  { label: 'Rotate', tool: new RotateTool(), bindings: [] },
+];
+
+let primaryToolIndex = 2;
+let toolEngine: RenderingEngine | null = null;
+const primaryToolButtons: HTMLButtonElement[] = [];
 
 interface ActiveViewport {
   viewport: Viewport;
@@ -112,6 +145,36 @@ function resetOrientation(): void {
     setStatus(`Reset orientation — ${misaligned.map((entry) => entry.orientation).join(', ')}.`);
   }
   syncResetButton();
+}
+
+function applyToolBindings(engine: RenderingEngine): void {
+  toolEngine = engine;
+  CAMERA_TOOLS.forEach(({ tool, bindings }, index) => {
+    engine.tools.add(tool);
+    const primary: Binding[] = index === primaryToolIndex ? [{ button: 'primary' }] : [];
+    engine.tools.setActive(tool, [...bindings, ...primary]);
+  });
+}
+
+function selectPrimaryTool(index: number): void {
+  primaryToolIndex = index;
+  primaryToolButtons.forEach((button, buttonIndex) => {
+    button.classList.toggle('text-stone-50', buttonIndex === index);
+    button.classList.toggle('text-stone-400', buttonIndex !== index);
+  });
+  if (toolEngine) applyToolBindings(toolEngine);
+}
+
+function buildPrimaryToolButtons(): void {
+  CAMERA_TOOLS.forEach(({ label }, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'cursor-pointer hover:underline';
+    button.textContent = label;
+    button.addEventListener('click', () => selectPrimaryTool(index));
+    primaryToolButtons.push(button);
+    primaryToolsEl.append(button);
+  });
 }
 
 function setStatus(message: string): void {
@@ -250,10 +313,12 @@ function buildControls(viewport: Viewport, volume: Volume, range: ControlRange):
       value: 0,
       format: (v) => String(Math.round(sliceBase + v / step)),
       apply: (v) => {
+        const { focalPoint, normal: liveNormal } = viewport.camera;
+        const shift = dotVec(center, liveNormal) + v - dotVec(focalPoint, liveNormal);
         viewport.camera.focalPoint = [
-          center[0] + normal[0] * v,
-          center[1] + normal[1] * v,
-          center[2] + normal[2] * v,
+          focalPoint[0] + liveNormal[0] * shift,
+          focalPoint[1] + liveNormal[1] * shift,
+          focalPoint[2] + liveNormal[2] * shift,
         ];
       },
     },
@@ -403,6 +468,7 @@ async function open(files: File[]): Promise<void> {
     return;
   }
 
+  applyToolBindings(engine);
   cancelActiveLoad();
   for (const { viewport } of activeViewports) engine.destroyViewport(viewport.id);
   activeViewports = [];
@@ -508,12 +574,15 @@ function cycleDebugView(): void {
 }
 
 function renderTimeFrame(): void {
+  syncResetButton();
   for (const { viewport } of activeViewports) {
     const label = document.querySelector<HTMLSpanElement>(`#${viewport.id}-time`);
     if (!label) continue;
     const ms = viewport.renderTimeMs;
     label.textContent = ms === null ? '' : `${ms.toFixed(2)} ms`;
   }
+  buildPrimaryToolButtons();
+  selectPrimaryTool(primaryToolIndex);
   requestAnimationFrame(renderTimeFrame);
 }
 
@@ -528,4 +597,6 @@ segments50Button.addEventListener('click', () => void addRandomSegments(50));
 segments1000Button.addEventListener('click', () => void addRandomSegments(1000));
 antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnabled));
 debugViewButton.addEventListener('click', cycleDebugView);
+buildPrimaryToolButtons();
+selectPrimaryTool(primaryToolIndex);
 requestAnimationFrame(renderTimeFrame);

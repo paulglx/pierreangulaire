@@ -2,6 +2,7 @@ import { cameraForOrientation, type Camera, type Orientation } from './camera';
 import type { VolumeFormat, VolumeGeometry } from './geometry';
 import { GPURenderer } from './renderer/gpu-renderer';
 import type { Renderer } from './renderer/renderer';
+import { ToolManager } from './tools/tool-manager';
 import { Viewport } from './viewport';
 import { type Rescale, Volume } from './volume';
 
@@ -20,6 +21,7 @@ export interface CreateViewportOptions {
 const DEFAULT_BRICK_SIZE = 32;
 
 export class RenderingEngine {
+  readonly tools = new ToolManager();
   private readonly renderer: Renderer;
   private readonly brickSize: number;
   private readonly volumes = new Map<string, Volume>();
@@ -77,6 +79,7 @@ export class RenderingEngine {
     const viewport = new Viewport(options.id, options.canvas, options.volume, camera);
     this.viewports.set(options.id, viewport);
     this.renderer.registerViewport(viewport);
+    this.tools.attach(viewport);
     return viewport;
   }
 
@@ -86,6 +89,7 @@ export class RenderingEngine {
 
   destroyViewport(id: string): void {
     if (!this.viewports.delete(id)) return;
+    this.tools.detach(id);
     this.renderer.destroyViewport(id);
   }
 
@@ -127,6 +131,7 @@ export class RenderingEngine {
       cancelAnimationFrame(this.rafHandle);
       this.rafHandle = null;
     }
+    this.tools.destroy();
     this.viewports.clear();
     this.volumes.clear();
     this.renderer.destroy();

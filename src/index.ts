@@ -11,8 +11,31 @@ export type { LabelStyle, SegmentationBrickRegion, SegmentationDirtyRegion } fro
 
 export { Viewport, DebugView } from './viewport';
 
-export { Camera, cameraForOrientation, fitCamera, worldToCanvas, canvasToWorld } from './camera';
-export type { Orientation, CameraBasis, CanvasPoint } from './camera';
+export {
+  Camera,
+  cameraForOrientation,
+  fitCamera,
+  worldToCanvas,
+  canvasToWorld,
+  sliceSpacing,
+  sliceRange,
+  sliceIndex,
+  scrollSlices,
+} from './camera';
+export type { Orientation, CameraBasis, CanvasPoint, SliceRange } from './camera';
+
+export { ToolManager } from './tools/tool-manager';
+export { PanTool, ZoomTool, SlabScrollTool, RotateTool } from './tools/camera-tools';
+export type {
+  Tool,
+  ToolState,
+  ToolEvent,
+  ToolStepEvent,
+  DragGesture,
+  Binding,
+  Modifier,
+  MouseButton,
+} from './tools/tool';
 
 export { BlendMode } from './blend';
 export type { WindowLevel } from './blend';

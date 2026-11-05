@@ -68,7 +68,7 @@ Everything is TypeScript. Responsibilities split between the renderer-agnostic c
 **Application layer** owns:
 
 - The DOM: canvas elements, resize observers, the render loop (`requestAnimationFrame`).
-- All pointer / wheel / touch events and their normalization.
+- All pointer / wheel / keyboard events and their normalization.
 - All tools (camera, annotation, segmentation editing).
 - The annotation overlay (SVG), stacked above the renderer's canvas.
 - Coordinate transforms (world↔canvas) computed synchronously from the one camera state.
@@ -253,6 +253,8 @@ The camera is always orthographic.
   A `position` is derivable as `focalPoint + normal * d` for any `d` (the rendered image is invariant to camera translation along `normal`), and the slab center is `focalPoint` projected onto `normal`.
 
 - **Slab navigation**: relative scrolling along the `normal` vector is an _operation_ that moves `focalPoint` along `normal`; the slab center is therefore read from `focalPoint`.
+- **Slices**: the slice spacing along `normal` is the spacing of the volume axis most aligned with `normal`, divided by the absolute cosine between them, i.e. one voxel step along that axis. Slice `i` is the plane at depth `i × spacing` from the volume origin along `normal`; the valid range covers the voxel centers of the volume. Scrolling by slices snaps the slab center onto the nearest slice first, then steps, and clamps to the valid range; on a preset view the slab center therefore always lands on a voxel plane.
+- **Operations**: `pan` translates `focalPoint` by a world vector; `zoomAt` scales `zoom` by a factor while keeping a world anchor point fixed on the canvas; `rotateAround` rotates `normal`, `up`, and `focalPoint` around a world pivot and axis, which leaves the pivot fixed on the canvas and at the same depth in the slab.
 
 Camera state lives in TypeScript as the single source of truth. It computes world↔canvas transforms synchronously for the overlay, and the active renderer derives the view and orthographic-projection matrices from the same state.
 
@@ -291,18 +293,34 @@ There is exactly one `RenderingEngine` for the lifetime of the application, reac
 
 Tools are TypeScript. They consume normalized interaction events and call viewport / editor / overlay APIs.
 
-Tool activation is **global**. A tool is registered once and is in exactly one state — active (bound to a mouse button / modifier and handling new gestures), passive (existing annotations stay interactive but no new gestures start), or disabled — for the whole application. That state applies to every viewport.
+Tool activation is **global**. A tool is registered once and is in exactly one state — active (bound to one or more bindings and handling new gestures), passive (existing annotations stay interactive but no new gestures start), or disabled — for the whole application. That state applies to every viewport. Tools are registered and activated through the engine's `ToolManager` (`engine.tools`): `add`, `setActive(tool, bindings)`, `setPassive`, `setDisabled`, `state`, `bindings`. A newly added tool is disabled.
+
+**Bindings.** A binding is a trigger plus an exact set of modifiers (`shift`, `ctrl`, `alt`, `meta`):
+
+| Trigger | Shape                                                 | Drives                                                    |
+| ------- | ----------------------------------------------------- | --------------------------------------------------------- |
+| Button  | `{ button: 'primary' \| 'secondary' \| 'auxiliary' }` | A drag gesture (`beginDrag`).                             |
+| Wheel   | `{ wheel: true }`                                     | Steps (`step`), signed by the wheel delta.                |
+| Key     | `{ key, steps }` (`KeyboardEvent.key`)                | `steps` steps (`step`) per keydown, auto-repeat included. |
+
+- Modifiers match exactly: a binding without modifiers does not fire while any modifier is held, and vice versa. Order and duplicates do not matter.
+- A binding belongs to at most one tool. `setActive` replaces the tool's bindings and takes each of them away from whichever tool held it; a tool left with no bindings drops to passive, as does a tool activated with none.
+- A tool declares the triggers it supports by implementing `beginDrag` (button bindings) and/or `step` (wheel and key bindings); binding an unsupported trigger throws.
+- The library ships no default bindings; the application sets them all.
+- One wheel step is 100 pixels, 3 lines, or 1 page of wheel delta; trackpads therefore produce fractional steps. On macOS a trackpad pinch arrives as a wheel event with `ctrl` held, so a `ctrl` wheel binding to `ZoomTool` gives pinch-to-zoom.
 
 ### 11.1 Camera tools
 
-| Tool              | Action                                                 |
-| ----------------- | ------------------------------------------------------ |
-| `PanTool`         | Translate camera in-plane.                             |
-| `ZoomTool`        | Adjust `zoom` (orthographic zoom).                     |
-| `RotateTool`      | Rotate the `normal` vector (oblique reslice).          |
-| `WindowLevelTool` | Drag to adjust window/level.                           |
-| `SlabScrollTool`  | Scroll the slab position along the `normal` vector.    |
-| `CrosshairsTool`  | Linked navigation across viewports of the same volume. |
+| Tool              | Action                                                 | Drag                                                                                                                               | Step (wheel / key)                                                            |
+| ----------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `PanTool`         | Translate camera in-plane.                             | The grabbed world point follows the cursor 1:1.                                                                                    | —                                                                             |
+| `ZoomTool`        | Adjust `zoom` (orthographic zoom).                     | Vertical travel, exponential (×e² per canvas height, dragging down zooms out), anchored at the press point.                        | ×1.5 per step (positive steps zoom out), anchored at the cursor.              |
+| `RotateTool`      | Rotate `normal` and `up` (oblique reslice, no roll).   | Horizontal travel rotates around screen up, vertical travel around screen right, π per canvas height, pivoting on the press point. | —                                                                             |
+| `WindowLevelTool` | Drag to adjust window/level.                           |                                                                                                                                    |                                                                               |
+| `SlabScrollTool`  | Scroll the slab position along the `normal` vector.    | Vertical travel; one canvas height spans every slice of the volume (dragging down moves along +`normal`).                          | One slice per step along +`normal`; fractional steps accumulate per viewport. |
+| `CrosshairsTool`  | Linked navigation across viewports of the same volume. |                                                                                                                                    |                                                                               |
+
+Slab scrolling snaps to slices and clamps to the volume (§8).
 
 ### 11.2 Annotation tools
 
@@ -343,7 +361,10 @@ The callback receives the prompt geometry (box bounds, or labeled points) togeth
 
 - **OverlayLayer**: an SVG element positioned over each viewport's render canvas. Renders annotations, cursors, reference lines, and text. Redrawn on camera change and on annotation change. Segmentations render through the volume pipeline.
 
-- **Event layer**: listens to native pointer/wheel/touch on the canvas, produces a normalized event (viewport id, canvas point, world point, buttons, modifiers), and dispatches to whichever active tool matches the event's binding.
+- **Event layer**: the `ToolManager` attaches to each viewport's canvas when the viewport is created and detaches when it is destroyed. It listens to native pointer and wheel events on the canvas and keydown on the canvas's document, resolves the event's trigger and modifiers to the active tool holding that binding, and hands the tool a normalized event (viewport, canvas point in canvas pixels, world point; plus the step count for wheel and key). Events no binding matches are left untouched.
+  - **Pointer**: the gesture's tool is fixed at pointerdown; the canvas captures the pointer so the drag continues outside it, and other buttons or modifier changes are ignored until the pointer is released. One gesture runs at a time. The canvas suppresses the context menu and middle-button autoscroll.
+  - **Keyboard**: a keydown goes to the viewport under the pointer (the last one the pointer moved over, cleared when it leaves), at the last pointer position; nothing happens when no viewport is hovered or when focus is in an editable element (`input`, `textarea`, `select`, `contenteditable`).
+  - **Touch** is not handled.
 
 ---
 
@@ -427,9 +448,10 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 - **Geometry & coordinates** (§4): `VolumeGeometry` with index↔world transforms.
 - **Brick store** (§5.1–5.3): page table with `Absent` / `Loading` / `Resident` states, per-brick voxel arrays in the volume's native format allocated on first write, progressive slice writes scattered into their bricks and flipping bands resident as they complete, dirty-brick tracking, and on-demand voxel sampling (NaN for `Absent` bricks).
 - **Volume** (§5.2): two-phase lifecycle (geometry first, slices streamed), optional rescale, slice writes, slice-loaded query, rescaled voxel sampling.
-- **Camera** (§8): orthographic camera (`normal`, `up`, `focalPoint`, `zoom`), `axial` / `coronal` / `sagittal` presets snapped to the volume grid, synchronous world↔canvas transforms, slab scroll along `normal`.
+- **Camera** (§8): orthographic camera (`normal`, `up`, `focalPoint`, `zoom`), `axial` / `coronal` / `sagittal` presets snapped to the volume grid, synchronous world↔canvas transforms, slab scroll along `normal`, slice spacing / range and snapped slice scrolling, `pan` / `zoomAt` / `rotateAround`.
+- **Tools & event layer** (§11, §12): the `ToolManager` with global tool states, button / wheel / key bindings with exact modifiers, binding takeover, and pointer / wheel / keyboard dispatch; the camera tools `PanTool`, `ZoomTool`, `SlabScrollTool`, and `RotateTool`.
 - **Viewport** (§9): one canvas + one volume, window/level, blend mode, slab thickness, voxel sampling.
-- **RenderingEngine** (§10): singleton module accessor + one-time async init, `createVolume` / `createViewport`, volume and viewport destruction (a volume referenced by a live viewport is rejected), full engine teardown (stops the loop, releases resources, destroys the renderer, resets the singleton), and a `requestAnimationFrame` loop that uploads dirty bricks and redraws dirty viewports.
+- **RenderingEngine** (§10): singleton module accessor + one-time async init, the global `ToolManager`, `createVolume` / `createViewport`, volume and viewport destruction (a volume referenced by a live viewport is rejected), full engine teardown (stops the loop, releases resources, destroys the renderer, resets the singleton), and a `requestAnimationFrame` loop that uploads dirty bricks and redraws dirty viewports.
 - **GPURenderer** (§7, §13): WebGPU orthographic slab raycast in WGSL, one canvas context per viewport. Each image volume is one dense 3D texture in its native texel format (`r16sint` / `r16uint` / `r8uint` / `r32float`) at the volume's own width and height, its depth folded into brick-aligned tiles along x when it exceeds `maxTextureDimension3D` (§5.1), allocated at creation and filled brick by brick in place as bricks become resident; a volume whose height, or width times tile count, exceeds `maxTextureDimension3D` is rejected at creation. The raycast reconstructs trilinear samples from 8 `textureLoad` taps at voxel indices (the base and next corners are clamped once, not per tap), applies the rescale once to the interpolated value, and skips non-resident bricks through the per-brick texel. A second dense 3D texture at a quarter of the volume's dimensions, folded into the same depth tiles, carries the 4³ **cell ranges** (§5.1) in the volume's native two-channel format, written per brick alongside the voxels. A `r32sint` **page-table texture** (one texel per brick) carries only the segmentation atlas slot as a packed slot coordinate (10 bits per axis, offset by one so 0 = unpainted). One bind-group layout per texel type (`f32` / `i32` / `u32`); one shader module per (texel type, segmentation visibility) since the overlay-hidden variant has a single color output; one render pipeline per (texel type, blend mode, segmentation visibility, debug view) combination, specialised through WGSL `override` constants (§7.2) and created on first use. When the adapter offers `timestamp-query` each viewport carries a two-entry query set plus resolve and readback buffers, and the measured frame time is published on the viewport.
 - **Blend modes** (§7.3): MIP, MinIP, Average. Composite is a basic front-to-back accumulation (grayscale used as opacity).
 - **Empty-space skipping, segmentation-space skipping & early ray termination** (§5.1, §7.2): a small `rgba32float` 3D texture (one texel per brick) carries the per-image-brick min/max value range in rescaled units, computed on residency, plus a segmentation occupancy flag dilated by one brick, maintained on segmentation upload; the range gates the per-sample trilinear fetch per blend mode against the live window/level (MIP and MinIP seeded at the window bound), a brick that passes is gated again against its 4³ cell range, the occupancy flag gates all segmentation sampling, and rays are clipped analytically to the volume bounds before marching. When a brick or cell is gated on both counts the ray leaps to its exit instead of stepping through it (§7.2). Composite, MIP, and MinIP stop image accumulation once the grayscale is clamped and terminate the ray once the per-ray segment set is also full. A per-viewport **debug view** (§9) draws the skipped bricks as a pink wireframe or the per-pixel fetch count as a heatmap.
@@ -447,4 +469,4 @@ The codebase currently implements the **minimal grayscale rendering path** end t
 
 ### 17.3 Not yet implemented
 
-The segmentation editor (§6.4 — erase, stroke grouping, undo/redo) and the editing/prompt tools (§11.3–11.4), all camera/annotation tools and the SVG overlay (§11, §12), the prioritized scheduler (§5.4), a software `CPURenderer` behind the `Renderer` interface (§13), and GPU compute fast paths (gradient precompute, histogram auto window/level).
+The segmentation editor (§6.4 — erase, stroke grouping, undo/redo) and the editing/prompt tools (§11.3–11.4), the `WindowLevelTool` and `CrosshairsTool` (§11.1), the annotation tools and the SVG overlay (§11.2, §12), the prioritized scheduler (§5.4), a software `CPURenderer` behind the `Renderer` interface (§13), and GPU compute fast paths (gradient precompute, histogram auto window/level).

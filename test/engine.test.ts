@@ -35,7 +35,14 @@ function fakeRenderer() {
 }
 
 function fakeCanvas(): HTMLCanvasElement {
-  return { clientWidth: 256, clientHeight: 256, width: 0, height: 0 } as HTMLCanvasElement;
+  return {
+    clientWidth: 256,
+    clientHeight: 256,
+    width: 0,
+    height: 0,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as HTMLCanvasElement;
 }
 
 let cancelled: number[];

@@ -28,3 +28,10 @@ export function normalize(a: Vec3): Vec3 {
   const l = length(a);
   return l === 0 ? [0, 0, 0] : [a[0] / l, a[1] / l, a[2] / l];
 }
+
+export function rotate(v: Vec3, axis: Vec3, angle: number): Vec3 {
+  const k = normalize(axis);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return add(add(scale(v, cos), scale(cross(k, v), sin)), scale(k, dot(k, v) * (1 - cos)));
+}
