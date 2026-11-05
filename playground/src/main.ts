@@ -505,9 +505,7 @@ async function addRandomSegments(count: number): Promise<void> {
       last = paintRandomPhantom(activeVolume);
       added++;
     }
-    setStatus(
-      `Added segment ${last.segment}: ${last.phantom.name}, ${last.radiusMm.toFixed(1)}mm (${added} / ${count})`,
-    );
+    setStatus(`Added segment ${last.segment} (${added} / ${count})`);
     await nextFrame();
   }
 }
