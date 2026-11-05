@@ -581,8 +581,6 @@ function renderTimeFrame(): void {
     const ms = viewport.renderTimeMs;
     label.textContent = ms === null ? '' : `${ms.toFixed(2)} ms`;
   }
-  buildPrimaryToolButtons();
-  selectPrimaryTool(primaryToolIndex);
   requestAnimationFrame(renderTimeFrame);
 }
 
