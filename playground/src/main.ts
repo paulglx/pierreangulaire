@@ -296,7 +296,7 @@ function setSlabRange(volume: Volume): void {
 function buildSlabControl(): HTMLElement {
   const control = document.createElement('div');
   control.className =
-    'flex cursor-ew-resize touch-none items-center gap-1 rounded-md bg-stone-900 p-0.5 pr-2 text-stone-400 select-none hover:text-stone-50';
+    'flex cursor-ew-resize touch-none items-center gap-1 pr-1 text-stone-400 select-none hover:text-stone-50';
   control.title = 'Slab thickness: drag to adjust, double-click to reset';
 
   const icon = document.createElement('span');
@@ -325,7 +325,7 @@ function buildSlabControl(): HTMLElement {
 
 function buildBlendControl(): HTMLElement {
   const control = document.createElement('div');
-  control.className = 'flex items-center gap-0.5 rounded-md bg-stone-900 p-0.5';
+  control.className = 'flex items-center gap-0.5';
 
   const buttons = BLEND_MODES.map(({ mode, label, name }) => {
     const button = document.createElement('button');
@@ -349,8 +349,14 @@ function buildBlendControl(): HTMLElement {
   return control;
 }
 
+function buildSeparator(): HTMLElement {
+  const separator = document.createElement('div');
+  separator.className = 'h-4 w-px bg-stone-800';
+  return separator;
+}
+
 function buildGlobalControls(): void {
-  globalControlsEl.replaceChildren(buildSlabControl(), buildBlendControl());
+  globalControlsEl.replaceChildren(buildSlabControl(), buildSeparator(), buildBlendControl());
 }
 
 async function streamSlices(

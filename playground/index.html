@@ -6,7 +6,7 @@
     <title>pierreangulaire</title>
   </head>
   <body class="flex h-full flex-col bg-stone-950 font-mono text-xs leading-snug text-stone-50">
-    <header class="flex flex-wrap items-center gap-4 px-4 pt-3 pb-1.5">
+    <header class="flex flex-wrap items-center gap-3 px-4 pt-3 pb-1.5">
       <h1 class="m-0 font-normal text-stone-400">pierreangulaire</h1>
       <label
         id="folder-label"
@@ -15,8 +15,10 @@
       >
         <input id="folder" class="hidden" type="file" webkitdirectory multiple />
       </label>
-      <div id="primary-tools" class="flex items-center gap-0.5 rounded-md bg-stone-900 p-0.5"></div>
-      <div class="flex items-center gap-0.5 rounded-md bg-stone-900 p-0.5">
+      <div class="h-4 w-px bg-stone-800"></div>
+      <div id="primary-tools" class="flex items-center gap-0.5"></div>
+      <div class="h-4 w-px bg-stone-800"></div>
+      <div class="flex items-center gap-0.5">
         <button
           id="segments-50"
           class="cursor-pointer rounded p-1 text-stone-400 hover:bg-stone-800"
@@ -36,8 +38,10 @@
           title="Antialiasing"
         ></button>
       </div>
-      <div id="global-controls" class="flex items-center gap-4"></div>
+      <div class="h-4 w-px bg-stone-800"></div>
+      <div id="global-controls" class="flex items-center gap-3"></div>
       <div id="status" class="ml-auto text-stone-400 tabular-nums"></div>
+      <div class="h-4 w-px bg-stone-800"></div>
       <div class="flex items-center gap-0.5">
         <button
           id="kebab"
