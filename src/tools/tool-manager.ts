@@ -255,11 +255,15 @@ export class ToolManager {
 
   private onWheel(viewport: Viewport, event: WheelEvent): void {
     const bound = this.find('wheel', event);
-    if (!bound?.tool.step) return;
+    if (!bound?.tool.step || !('wheel' in bound.binding)) return;
     event.preventDefault();
     const canvasPoint = canvasPointOf(viewport.canvas, event);
     this.hover = { viewport, canvasPoint };
-    bound.tool.step({ ...this.toolEvent(viewport, canvasPoint), steps: wheelSteps(event) });
+    const stepsPerWheelStep = bound.binding.steps ?? 1;
+    bound.tool.step({
+      ...this.toolEvent(viewport, canvasPoint),
+      steps: wheelSteps(event) * stepsPerWheelStep,
+    });
   }
 
   private onKeyDown(viewport: Viewport, event: KeyboardEvent): void {

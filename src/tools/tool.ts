@@ -8,7 +8,7 @@ export type MouseButton = 'primary' | 'secondary' | 'auxiliary';
 
 export type Binding =
   | { readonly button: MouseButton; readonly modifiers?: readonly Modifier[] }
-  | { readonly wheel: true; readonly modifiers?: readonly Modifier[] }
+  | { readonly wheel: true; readonly steps?: number; readonly modifiers?: readonly Modifier[] }
   | { readonly key: string; readonly steps: number; readonly modifiers?: readonly Modifier[] };
 
 export type ToolState = 'active' | 'passive' | 'disabled';

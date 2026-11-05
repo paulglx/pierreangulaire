@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { Camera, cameraForOrientation, sliceIndex, sliceRange, sliceSpacing } from '../src/camera';
 import type { VolumeGeometry } from '../src/geometry';
 import { PanTool, RotateTool, SlabScrollTool, ZoomTool } from '../src/tools/camera-tools';
@@ -171,4 +171,15 @@ test('keys step the tool of the hovered viewport', () => {
   fire('keydown', { key: 'ArrowDown', target: null });
   fire('keydown', { key: 'ArrowUp', target: null });
   expect(sliceIndex(viewport.camera, geometry)).toBe(start + 1);
+});
+
+test('a wheel binding scales and signs the wheel steps', () => {
+  vi.stubGlobal('WheelEvent', { DOM_DELTA_PIXEL: 0, DOM_DELTA_LINE: 1, DOM_DELTA_PAGE: 2 });
+  const { tools, viewport, fire } = setup();
+  const scroll = tools.add(new SlabScrollTool());
+  tools.setActive(scroll, [{ wheel: true, steps: -1 }]);
+  const start = sliceIndex(viewport.camera, geometry);
+  expect(fire('wheel', { deltaX: 0, deltaY: 200, deltaMode: 0 })).toBe(true);
+  expect(sliceIndex(viewport.camera, geometry)).toBe(start - 2);
+  vi.unstubAllGlobals();
 });

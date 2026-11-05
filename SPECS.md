@@ -298,11 +298,11 @@ Tool activation is **global**. A tool is registered once and is in exactly one s
 
 **Bindings.** A binding is a trigger plus an exact set of modifiers (`shift`, `ctrl`, `alt`, `meta`):
 
-| Trigger | Shape                                                 | Drives                                                    |
-| ------- | ----------------------------------------------------- | --------------------------------------------------------- |
-| Button  | `{ button: 'primary' \| 'secondary' \| 'auxiliary' }` | A drag gesture (`beginDrag`).                             |
-| Wheel   | `{ wheel: true }`                                     | Steps (`step`), signed by the wheel delta.                |
-| Key     | `{ key, steps }` (`KeyboardEvent.key`)                | `steps` steps (`step`) per keydown, auto-repeat included. |
+| Trigger | Shape                                                 | Drives                                                                                                   |
+| ------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Button  | `{ button: 'primary' \| 'secondary' \| 'auxiliary' }` | A drag gesture (`beginDrag`).                                                                            |
+| Wheel   | `{ wheel: true, steps? }`                             | Steps (`step`), signed by the wheel delta and multiplied by `steps` (default 1; `-1` inverts the wheel). |
+| Key     | `{ key, steps }` (`KeyboardEvent.key`)                | `steps` steps (`step`) per keydown, auto-repeat included.                                                |
 
 - Modifiers match exactly: a binding without modifiers does not fire while any modifier is held, and vice versa. Order and duplicates do not matter.
 - A binding belongs to at most one tool. `setActive` replaces the tool's bindings and takes each of them away from whichever tool held it; a tool left with no bindings drops to passive, as does a tool activated with none.

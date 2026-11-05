@@ -82,7 +82,11 @@ const CAMERA_TOOLS: CameraToolEntry[] = [
     label: 'Scroll',
     icon: Layers,
     tool: new SlabScrollTool(),
-    bindings: [{ wheel: true }, { key: 'ArrowUp', steps: -1 }, { key: 'ArrowDown', steps: 1 }],
+    bindings: [
+      { wheel: true, steps: -1 },
+      { key: 'ArrowUp', steps: -1 },
+      { key: 'ArrowDown', steps: 1 },
+    ],
   },
   { label: 'Rotate', icon: Rotate3d, tool: new RotateTool(), bindings: [] },
 ];
