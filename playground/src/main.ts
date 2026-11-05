@@ -33,7 +33,7 @@ import {
   RotateCcw,
   Spline,
   SquarePlus,
-  UnfoldVertical,
+  UnfoldHorizontal,
   ZoomIn,
 } from 'lucide';
 import { decodeSeries, openSeries, type Series, type SliceLoad } from './dicom';
@@ -267,14 +267,33 @@ function formatSlab(thickness: number): string {
   return thickness < 10 ? `${thickness.toFixed(1)}mm` : `${Math.round(thickness)}mm`;
 }
 
-function buildSlabControl(volume: Volume): HTMLElement {
-  const min = Math.min(...volume.geometry.spacing);
+let slabMin = 1;
+let slabMax = 2;
+let slabPosition = 0;
+const slabValueEl = document.createElement('span');
+
+function slabThickness(): number {
+  return slabMin * (slabMax / slabMin) ** slabPosition;
+}
+
+function setSlabPosition(next: number): void {
+  slabPosition = Math.min(1, Math.max(0, next));
+  const thickness = slabThickness();
+  slabValueEl.textContent = formatSlab(thickness);
+  for (const { viewport } of activeViewports) viewport.setSlabThickness(thickness);
+  markAllDirty();
+}
+
+function setSlabRange(volume: Volume): void {
+  slabMin = Math.min(...volume.geometry.spacing);
   const maxHalf = Math.max(
     ...activeViewports.map(({ baseNormal }) => halfExtentAlong(volume, baseNormal)),
   );
-  const max = Math.max(min * 2, maxHalf * 2);
-  const thicknessAt = (t: number): number => min * (max / min) ** t;
+  slabMax = Math.max(slabMin * 2, maxHalf * 2);
+  setSlabPosition(slabPosition);
+}
 
+function buildSlabControl(): HTMLElement {
   const control = document.createElement('div');
   control.className =
     'flex cursor-ew-resize touch-none items-center gap-1 rounded-md bg-stone-900 p-0.5 pr-2 text-stone-400 select-none hover:text-stone-50';
@@ -282,35 +301,25 @@ function buildSlabControl(volume: Volume): HTMLElement {
 
   const icon = document.createElement('span');
   icon.className = 'p-1';
-  setIcon(icon, UnfoldVertical);
+  setIcon(icon, UnfoldHorizontal);
 
-  const value = document.createElement('span');
-  value.className = 'w-12 text-right tabular-nums';
-
-  let position = 0;
-  const apply = (next: number): void => {
-    position = Math.min(1, Math.max(0, next));
-    const thickness = thicknessAt(position);
-    value.textContent = formatSlab(thickness);
-    for (const { viewport } of activeViewports) viewport.setSlabThickness(thickness);
-    markAllDirty();
-  };
+  slabValueEl.className = 'w-12 text-right tabular-nums';
+  slabValueEl.textContent = formatSlab(slabThickness());
 
   let dragStartX = 0;
   let dragStartPosition = 0;
   control.addEventListener('pointerdown', (event) => {
     control.setPointerCapture(event.pointerId);
     dragStartX = event.clientX;
-    dragStartPosition = position;
+    dragStartPosition = slabPosition;
   });
   control.addEventListener('pointermove', (event) => {
     if (!control.hasPointerCapture(event.pointerId)) return;
-    apply(dragStartPosition + (event.clientX - dragStartX) / SLAB_DRAG_PIXELS);
+    setSlabPosition(dragStartPosition + (event.clientX - dragStartX) / SLAB_DRAG_PIXELS);
   });
-  control.addEventListener('dblclick', () => apply(0));
+  control.addEventListener('dblclick', () => setSlabPosition(0));
 
-  value.textContent = formatSlab(thicknessAt(0));
-  control.append(icon, value);
+  control.append(icon, slabValueEl);
   return control;
 }
 
@@ -340,8 +349,8 @@ function buildBlendControl(): HTMLElement {
   return control;
 }
 
-function buildGlobalControls(volume: Volume): void {
-  globalControlsEl.replaceChildren(buildSlabControl(volume), buildBlendControl());
+function buildGlobalControls(): void {
+  globalControlsEl.replaceChildren(buildSlabControl(), buildBlendControl());
 }
 
 async function streamSlices(
@@ -445,7 +454,7 @@ async function open(files: File[]): Promise<void> {
     });
     observer.observe(canvas);
   }
-  buildGlobalControls(volume);
+  setSlabRange(volume);
 
   const applyAutoWindow = (min: number, max: number): void => {
     if (series.hasTaggedWindow) return;
@@ -540,5 +549,6 @@ setKebab(false);
 setAntialiasing(true);
 showDebugView();
 buildPrimaryToolButtons();
+buildGlobalControls();
 selectPrimaryTool(primaryToolIndex);
 requestAnimationFrame(renderTimeFrame);
