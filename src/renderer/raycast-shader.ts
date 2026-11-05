@@ -472,10 +472,11 @@ fn resolveAliased(px: vec2<f32>) -> vec4<f32> {
     if (!interior) {
       a = max(a, BORDER_ALPHA);
     }
-    color = color + style.rgb * a;
-    alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
+    let transmittance = 1.0 - alpha;
+    color = color + transmittance * style.rgb * a;
+    alpha = alpha + transmittance * a;
   }
-  return vec4<f32>(min(color, vec3<f32>(1.0)), alpha);
+  return vec4<f32>(color, alpha);
 }
 
 fn resolveAntialiased(px: vec2<f32>, q: vec3<f32>) -> vec4<f32> {
@@ -491,6 +492,7 @@ fn resolveAntialiased(px: vec2<f32>, q: vec3<f32>) -> vec4<f32> {
 
   var seen: array<u32, 16>;
   var cov: array<f32, 16>;
+  var depthRank: array<u32, 16>;
   var seenCount = 0u;
   var weightSum = 0.0;
   let anchor = planeProject(round(q) - q);
@@ -522,9 +524,11 @@ fn resolveAntialiased(px: vec2<f32>, q: vec3<f32>) -> vec4<f32> {
           }
           seen[seenCount] = segment;
           cov[seenCount] = 0.0;
+          depthRank[seenCount] = k;
           seenCount = seenCount + 1u;
         }
         cov[idx] = cov[idx] + weight;
+        depthRank[idx] = min(depthRank[idx], k);
       }
     }
   }
@@ -535,23 +539,29 @@ fn resolveAntialiased(px: vec2<f32>, q: vec3<f32>) -> vec4<f32> {
   let halfBand = clamp(0.6 * U.pixelVoxels / SEG_SUPPORT, 0.01, 0.15);
   var color = vec3<f32>(0.0);
   var alpha = 0.0;
-  for (var i = 0u; i < seenCount; i = i + 1u) {
-    let segment = seen[i];
-    let style = labels[segment];
-    if (style.a == 0.0) {
-      continue;
+  for (var rank = 0u; rank < 8u; rank = rank + 1u) {
+    for (var i = 0u; i < seenCount; i = i + 1u) {
+      if (depthRank[i] != rank) {
+        continue;
+      }
+      let segment = seen[i];
+      let style = labels[segment];
+      if (style.a == 0.0) {
+        continue;
+      }
+      let c = cov[i] / weightSum;
+      let outer = smoothstep(SEG_ISO - halfBand, SEG_ISO + halfBand, c);
+      if (outer <= 0.0) {
+        continue;
+      }
+      let inner = smoothstep(SEG_ISO_INNER - halfBand, SEG_ISO_INNER + halfBand, c);
+      let a = inner * style.a + max(outer - inner, 0.0) * BORDER_ALPHA;
+      let transmittance = 1.0 - alpha;
+      color = color + transmittance * style.rgb * a;
+      alpha = alpha + transmittance * a;
     }
-    let c = cov[i] / weightSum;
-    let outer = smoothstep(SEG_ISO - halfBand, SEG_ISO + halfBand, c);
-    if (outer <= 0.0) {
-      continue;
-    }
-    let inner = smoothstep(SEG_ISO_INNER - halfBand, SEG_ISO_INNER + halfBand, c);
-    let a = inner * style.a + max(outer - inner, 0.0) * BORDER_ALPHA;
-    color = color + style.rgb * a;
-    alpha = 1.0 - (1.0 - alpha) * (1.0 - a);
   }
-  return vec4<f32>(min(color, vec3<f32>(1.0)), alpha);
+  return vec4<f32>(color, alpha);
 }
 
 @fragment
