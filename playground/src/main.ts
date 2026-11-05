@@ -23,12 +23,12 @@ import {
   Flame,
   FolderOpen,
   Grid3x3,
-  House,
   type IconNode,
   Layers,
   Move,
   Orbit,
   Rotate3d,
+  RotateCcw,
   Spline,
   SquarePlus,
   ZoomIn,
@@ -556,7 +556,7 @@ antialiasButton.addEventListener('click', () => setAntialiasing(!antialiasEnable
 debugViewButton.addEventListener('click', cycleDebugView);
 folderInput.before(createElement(FolderOpen, { class: 'block size-4' }));
 setIcon(kebabButton, Orbit);
-setIcon(resetButton, House);
+setIcon(resetButton, RotateCcw);
 setIcon(segments50Button, SquarePlus);
 setIcon(segments1000Button, CopyPlus);
 setIcon(antialiasButton, Spline);
