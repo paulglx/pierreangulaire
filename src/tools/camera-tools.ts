@@ -3,7 +3,7 @@ import { sub } from '../math';
 import type { DragGesture, Tool, ToolEvent, ToolStepEvent } from './tool';
 
 const ZOOM_PER_STEP = 1.5;
-const ZOOM_PER_CANVAS_HEIGHT = Math.exp(2);
+const ZOOM_PER_CANVAS_HEIGHT = Math.exp(4);
 const ROTATION_PER_CANVAS_HEIGHT = Math.PI;
 
 function verticalTravel(from: CanvasPoint, to: CanvasPoint, event: ToolEvent): number {
@@ -39,7 +39,7 @@ export class ZoomTool implements Tool {
       move(event) {
         const travel = verticalTravel(previous, event.canvasPoint, event);
         previous = event.canvasPoint;
-        event.viewport.camera.zoomAt(ZOOM_PER_CANVAS_HEIGHT ** travel, start.worldPoint);
+        event.viewport.camera.zoomAt(ZOOM_PER_CANVAS_HEIGHT ** -travel, start.worldPoint);
         event.viewport.markDirty();
       },
     };
