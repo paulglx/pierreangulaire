@@ -78,7 +78,7 @@ const CAMERA_TOOLS: CameraToolEntry[] = [
     label: 'Zoom',
     icon: ZoomIn,
     tool: new ZoomTool(),
-    bindings: [{ button: 'secondary' }, { wheel: true, modifiers: ['ctrl'] }],
+    bindings: [{ wheel: true, modifiers: ['ctrl'] }],
   },
   {
     label: 'Scroll',
@@ -91,7 +91,12 @@ const CAMERA_TOOLS: CameraToolEntry[] = [
     ],
   },
   { label: 'Rotate', icon: Rotate3d, tool: new RotateTool(), bindings: [] },
-  { label: 'Window', icon: Contrast, tool: new WindowLevelTool(), bindings: [] },
+  {
+    label: 'Window',
+    icon: Contrast,
+    tool: new WindowLevelTool(),
+    bindings: [{ button: 'secondary' }],
+  },
 ];
 
 function setIcon(element: HTMLElement, icon: IconNode): void {
