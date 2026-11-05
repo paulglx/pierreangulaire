@@ -25,7 +25,13 @@ export {
 export type { Orientation, CameraBasis, CanvasPoint, SliceRange } from './camera';
 
 export { ToolManager } from './tools/tool-manager';
-export { PanTool, ZoomTool, SlabScrollTool, RotateTool } from './tools/camera-tools';
+export {
+  PanTool,
+  ZoomTool,
+  SlabScrollTool,
+  RotateTool,
+  WindowLevelTool,
+} from './tools/camera-tools';
 export type {
   Tool,
   ToolState,

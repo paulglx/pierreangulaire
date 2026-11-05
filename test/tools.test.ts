@@ -1,7 +1,13 @@
 import { expect, test, vi } from 'vitest';
 import { Camera, cameraForOrientation, sliceIndex, sliceRange, sliceSpacing } from '../src/camera';
 import type { VolumeGeometry } from '../src/geometry';
-import { PanTool, RotateTool, SlabScrollTool, ZoomTool } from '../src/tools/camera-tools';
+import {
+  PanTool,
+  RotateTool,
+  SlabScrollTool,
+  WindowLevelTool,
+  ZoomTool,
+} from '../src/tools/camera-tools';
 import { ToolManager } from '../src/tools/tool-manager';
 import { Viewport } from '../src/viewport';
 import { Volume } from '../src/volume';
@@ -122,6 +128,23 @@ test('a drag pans the camera so the grabbed point follows the cursor', () => {
   const after = viewport.worldToCanvas(grabbed);
   expect(after.x).toBeCloseTo(80);
   expect(after.y).toBeCloseTo(10);
+});
+
+test('a drag widens the window horizontally and raises the level downward', () => {
+  const { tools, viewport, fire } = setup();
+  const windowLevel = tools.add(new WindowLevelTool());
+  tools.setActive(windowLevel, [{ button: 'primary' }]);
+  viewport.setWindowLevel({ center: 40, width: 400 });
+  viewport.dirty = false;
+  fire('pointerdown', {});
+  fire('pointermove', { clientX: 100 });
+  expect(viewport.windowLevel.width).toBeCloseTo(400 * Math.E);
+  expect(viewport.windowLevel.center).toBeCloseTo(40);
+  expect(viewport.dirty).toBe(true);
+  fire('pointermove', { clientX: 100, clientY: 75 });
+  expect(viewport.windowLevel.center).toBeCloseTo(40 + 100 * Math.E);
+  fire('pointermove', { clientX: 0, clientY: 75 });
+  expect(viewport.windowLevel.width).toBeCloseTo(400 / Math.E);
 });
 
 test('modifiers must match a binding exactly', () => {

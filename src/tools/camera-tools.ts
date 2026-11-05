@@ -5,6 +5,7 @@ import type { DragGesture, Tool, ToolEvent, ToolStepEvent } from './tool';
 const ZOOM_PER_STEP = 1.5;
 const ZOOM_PER_CANVAS_HEIGHT = Math.exp(4);
 const ROTATION_PER_CANVAS_HEIGHT = Math.PI;
+const WINDOW_WIDTH_PER_CANVAS_HEIGHT = Math.exp(2);
 
 function verticalTravel(from: CanvasPoint, to: CanvasPoint, event: ToolEvent): number {
   return (to.y - from.y) / event.viewport.canvas.height;
@@ -104,6 +105,27 @@ export class RotateTool implements Tool {
         camera.rotateAround(start.worldPoint, trueUp, -yaw);
         camera.rotateAround(start.worldPoint, right, -pitch);
         event.viewport.markDirty();
+      },
+    };
+  }
+}
+
+export class WindowLevelTool implements Tool {
+  readonly name = 'WindowLevel';
+
+  beginDrag(start: ToolEvent): DragGesture {
+    let previous = start.canvasPoint;
+    return {
+      move(event) {
+        const { viewport } = event;
+        const { center, width } = viewport.windowLevel;
+        const widthTravel = horizontalTravel(previous, event.canvasPoint, event);
+        const centerTravel = verticalTravel(previous, event.canvasPoint, event);
+        previous = event.canvasPoint;
+        viewport.setWindowLevel({
+          center: center + centerTravel * width,
+          width: width * WINDOW_WIDTH_PER_CANVAS_HEIGHT ** widthTravel,
+        });
       },
     };
   }

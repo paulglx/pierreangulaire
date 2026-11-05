@@ -14,10 +14,12 @@ import {
   type Vec3,
   type Viewport,
   type Volume,
+  WindowLevelTool,
   ZoomTool,
 } from 'pierreangulaire';
 import {
   Bug,
+  Contrast,
   CopyPlus,
   createElement,
   Flame,
@@ -89,6 +91,7 @@ const CAMERA_TOOLS: CameraToolEntry[] = [
     ],
   },
   { label: 'Rotate', icon: Rotate3d, tool: new RotateTool(), bindings: [] },
+  { label: 'Window', icon: Contrast, tool: new WindowLevelTool(), bindings: [] },
 ];
 
 function setIcon(element: HTMLElement, icon: IconNode): void {
@@ -117,6 +120,7 @@ let activeLoad: SliceLoad | null = null;
 let antialiasEnabled = true;
 let debugViewIndex = 0;
 let blendMode: BlendMode = BlendMode.MIP;
+const windowLevelSyncs = new Map<string, () => void>();
 
 let kebabEnabled = false;
 let kebabRaf = 0;
@@ -248,7 +252,11 @@ interface SliderSpec {
   apply: (value: number) => void;
 }
 
-function addSlider(controls: HTMLElement, spec: SliderSpec, markDirty: () => void): void {
+function addSlider(
+  controls: HTMLElement,
+  spec: SliderSpec,
+  markDirty: () => void,
+): (value: number) => void {
   const label = document.createElement('label');
   label.className = 'flex items-center gap-2';
 
@@ -277,6 +285,11 @@ function addSlider(controls: HTMLElement, spec: SliderSpec, markDirty: () => voi
 
   label.append(name, input, value);
   controls.append(label);
+
+  return (next) => {
+    input.value = String(next);
+    value.textContent = spec.format(next);
+  };
 }
 
 interface ControlRange {
@@ -314,7 +327,13 @@ function buildControls(viewport: Viewport, range: ControlRange): void {
     },
   ];
 
-  for (const spec of specs) addSlider(controls, spec, () => viewport.markDirty());
+  const [showLevel, showWindow] = specs.map((spec) =>
+    addSlider(controls, spec, () => viewport.markDirty()),
+  );
+  windowLevelSyncs.set(viewport.id, () => {
+    showLevel!(viewport.windowLevel.center);
+    showWindow!(viewport.windowLevel.width);
+  });
   panel.append(controls);
 }
 
@@ -535,14 +554,15 @@ function cycleDebugView(): void {
   for (const { viewport } of activeViewports) viewport.setDebugView(view);
 }
 
-function renderTimeFrame(): void {
+function overlayFrame(): void {
+  for (const sync of windowLevelSyncs.values()) sync();
   for (const { viewport } of activeViewports) {
     const label = document.querySelector<HTMLSpanElement>(`#${viewport.id}-time`);
     if (!label) continue;
     const ms = viewport.renderTimeMs;
     label.textContent = ms === null ? '' : `${ms.toFixed(2)} ms`;
   }
-  requestAnimationFrame(renderTimeFrame);
+  requestAnimationFrame(overlayFrame);
 }
 
 function filesFrom(input: HTMLInputElement): File[] {
@@ -567,4 +587,4 @@ setAntialiasing(true);
 showDebugView();
 buildPrimaryToolButtons();
 selectPrimaryTool(primaryToolIndex);
-requestAnimationFrame(renderTimeFrame);
+requestAnimationFrame(overlayFrame);
