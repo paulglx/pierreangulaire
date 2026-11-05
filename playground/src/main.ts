@@ -125,7 +125,6 @@ let activeLoad: SliceLoad | null = null;
 let antialiasEnabled = true;
 let debugViewIndex = 0;
 let blendMode: BlendMode = BlendMode.MIP;
-const windowLevelSyncs = new Map<string, () => void>();
 
 let kebabEnabled = false;
 let kebabRaf = 0;
@@ -257,11 +256,7 @@ interface SliderSpec {
   apply: (value: number) => void;
 }
 
-function addSlider(
-  controls: HTMLElement,
-  spec: SliderSpec,
-  markDirty: () => void,
-): (value: number) => void {
+function addSlider(controls: HTMLElement, spec: SliderSpec, markDirty: () => void): void {
   const label = document.createElement('label');
   label.className = 'flex items-center gap-2';
 
@@ -290,56 +285,6 @@ function addSlider(
 
   label.append(name, input, value);
   controls.append(label);
-
-  return (next) => {
-    input.value = String(next);
-    value.textContent = spec.format(next);
-  };
-}
-
-interface ControlRange {
-  min: number;
-  max: number;
-  center: number;
-  width: number;
-}
-
-function buildControls(viewport: Viewport, range: ControlRange): void {
-  const panel = viewport.canvas.parentElement!;
-  panel.querySelector('[data-controls]')?.remove();
-  const controls = document.createElement('div');
-  controls.dataset.controls = '';
-  controls.className = 'absolute bottom-2.5 left-2.5 flex flex-col gap-1 text-shadow-sm';
-
-  const specs: SliderSpec[] = [
-    {
-      name: 'Level',
-      min: range.min,
-      max: range.max,
-      step: 1,
-      value: range.center,
-      format: (v) => String(Math.round(v)),
-      apply: (v) => viewport.setWindowLevel({ center: v, width: viewport.windowLevel.width }),
-    },
-    {
-      name: 'Window',
-      min: 1,
-      max: Math.max(2, range.max - range.min),
-      step: 1,
-      value: range.width,
-      format: (v) => String(Math.round(v)),
-      apply: (v) => viewport.setWindowLevel({ center: viewport.windowLevel.center, width: v }),
-    },
-  ];
-
-  const [showLevel, showWindow] = specs.map((spec) =>
-    addSlider(controls, spec, () => viewport.markDirty()),
-  );
-  windowLevelSyncs.set(viewport.id, () => {
-    showLevel!(viewport.windowLevel.center);
-    showWindow!(viewport.windowLevel.width);
-  });
-  panel.append(controls);
 }
 
 function cancelActiveLoad(): void {
@@ -392,7 +337,7 @@ async function streamSlices(
   volume: Volume,
   series: Series,
   onRange: (min: number, max: number) => void,
-): Promise<ControlRange | null> {
+): Promise<boolean> {
   let rawMin = Number.POSITIVE_INFINITY;
   let rawMax = Number.NEGATIVE_INFINITY;
   let loaded = 0;
@@ -415,12 +360,8 @@ async function streamSlices(
   activeLoad = load;
   const completed = await load.done;
   progress.cancel();
-  if (!completed) return null;
-  const [min, max] = scaled();
-  onRange(min, max);
-  const center = series.hasTaggedWindow ? series.windowCenter : (min + max) / 2;
-  const width = series.hasTaggedWindow ? series.windowWidth : Math.max(1, max - min);
-  return { min, max, center, width };
+  if (completed) onRange(...scaled());
+  return completed;
 }
 
 async function open(files: File[]): Promise<void> {
@@ -470,7 +411,6 @@ async function open(files: File[]): Promise<void> {
 
   for (const panel of PANELS) {
     const canvas = document.querySelector<HTMLCanvasElement>(`#${panel.id}`)!;
-    canvas.parentElement?.querySelector('[data-controls]')?.remove();
     const viewport = engine.createViewport({
       id: panel.id,
       canvas,
@@ -506,15 +446,14 @@ async function open(files: File[]): Promise<void> {
     }
   };
 
-  let range: ControlRange | null;
+  let completed: boolean;
   try {
-    range = await streamSlices(volume, series, applyAutoWindow);
+    completed = await streamSlices(volume, series, applyAutoWindow);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : 'Failed to decode DICOM slices.');
     return;
   }
-  if (!range) return;
-  for (const { viewport } of activeViewports) buildControls(viewport, range);
+  if (!completed) return;
   setStatus(`${series.description} ${dx}×${dy}×${dz}`);
 }
 
@@ -559,15 +498,14 @@ function cycleDebugView(): void {
   for (const { viewport } of activeViewports) viewport.setDebugView(view);
 }
 
-function overlayFrame(): void {
-  for (const sync of windowLevelSyncs.values()) sync();
+function renderTimeFrame(): void {
   for (const { viewport } of activeViewports) {
     const label = document.querySelector<HTMLSpanElement>(`#${viewport.id}-time`);
     if (!label) continue;
     const ms = viewport.renderTimeMs;
     label.textContent = ms === null ? '' : `${ms.toFixed(2)} ms`;
   }
-  requestAnimationFrame(overlayFrame);
+  requestAnimationFrame(renderTimeFrame);
 }
 
 function filesFrom(input: HTMLInputElement): File[] {
@@ -592,4 +530,4 @@ setAntialiasing(true);
 showDebugView();
 buildPrimaryToolButtons();
 selectPrimaryTool(primaryToolIndex);
-requestAnimationFrame(overlayFrame);
+requestAnimationFrame(renderTimeFrame);
