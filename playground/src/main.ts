@@ -33,6 +33,7 @@ import {
   RotateCcw,
   Spline,
   SquarePlus,
+  UnfoldVertical,
   ZoomIn,
 } from 'lucide';
 import { decodeSeries, openSeries, type Series, type SliceLoad } from './dicom';
@@ -58,7 +59,12 @@ const PANELS: { id: string; orientation: Orientation }[] = [
   { id: 'sagittal', orientation: 'sagittal' },
 ];
 
-const BLEND_NAMES = ['MIP', 'MinIP', 'Average', 'Composite'];
+const BLEND_MODES: { mode: BlendMode; label: string; name: string }[] = [
+  { mode: BlendMode.MIP, label: 'MIP', name: 'Maximum intensity projection' },
+  { mode: BlendMode.MinIP, label: 'MinIP', name: 'Minimum intensity projection' },
+  { mode: BlendMode.Average, label: 'Avg', name: 'Average' },
+  { mode: BlendMode.Composite, label: 'Comp', name: 'Composite' },
+];
 const DEBUG_VIEWS: { view: DebugView; name: string; icon: IconNode }[] = [
   { view: DebugView.None, name: 'off', icon: Bug },
   { view: DebugView.EmptyBlocks, name: 'empty blocks', icon: Grid3x3 },
@@ -246,47 +252,6 @@ function halfExtentAlong(volume: Volume, normal: Vec3): number {
   return 0.5 * total;
 }
 
-interface SliderSpec {
-  name: string;
-  min: number;
-  max: number;
-  step: number | 'any';
-  value: number;
-  format: (value: number) => string;
-  apply: (value: number) => void;
-}
-
-function addSlider(controls: HTMLElement, spec: SliderSpec, markDirty: () => void): void {
-  const label = document.createElement('label');
-  label.className = 'flex items-center gap-2';
-
-  const name = document.createElement('span');
-  name.className = 'w-20 text-stone-400 uppercase tracking-wider';
-  name.textContent = spec.name;
-
-  const input = document.createElement('input');
-  input.type = 'range';
-  input.className = 'm-0 h-2.5 w-24 accent-stone-400';
-  input.min = String(spec.min);
-  input.max = String(spec.max);
-  input.step = String(spec.step);
-  input.value = String(spec.value);
-
-  const value = document.createElement('span');
-  value.className = 'w-24 text-right tabular-nums';
-  value.textContent = spec.format(spec.value);
-
-  input.addEventListener('input', () => {
-    const next = Number(input.value);
-    spec.apply(next);
-    value.textContent = spec.format(next);
-    markDirty();
-  });
-
-  label.append(name, input, value);
-  controls.append(label);
-}
-
 function cancelActiveLoad(): void {
   activeLoad?.cancel();
   activeLoad = null;
@@ -296,41 +261,87 @@ function markAllDirty(): void {
   for (const { viewport } of activeViewports) viewport.markDirty();
 }
 
-function buildGlobalControls(volume: Volume): void {
-  globalControlsEl.replaceChildren();
+const SLAB_DRAG_PIXELS = 240;
 
-  const minSpacing = Math.min(...volume.geometry.spacing);
+function formatSlab(thickness: number): string {
+  return thickness < 10 ? `${thickness.toFixed(1)}mm` : `${Math.round(thickness)}mm`;
+}
+
+function buildSlabControl(volume: Volume): HTMLElement {
+  const min = Math.min(...volume.geometry.spacing);
   const maxHalf = Math.max(
     ...activeViewports.map(({ baseNormal }) => halfExtentAlong(volume, baseNormal)),
   );
+  const max = Math.max(min * 2, maxHalf * 2);
+  const thicknessAt = (t: number): number => min * (max / min) ** t;
 
-  const specs: SliderSpec[] = [
-    {
-      name: 'Slab',
-      min: minSpacing,
-      max: Math.max(minSpacing * 2, maxHalf * 2),
-      step: 'any',
-      value: minSpacing,
-      format: (v) => `${Math.round(v)}mm`,
-      apply: (v) => {
-        for (const { viewport } of activeViewports) viewport.setSlabThickness(v);
-      },
-    },
-    {
-      name: 'Blend',
-      min: 0,
-      max: 3,
-      step: 1,
-      value: blendMode,
-      format: (v) => BLEND_NAMES[v] ?? '',
-      apply: (v) => {
-        blendMode = v as BlendMode;
-        for (const { viewport } of activeViewports) viewport.setBlendMode(blendMode);
-      },
-    },
-  ];
+  const control = document.createElement('div');
+  control.className =
+    'flex cursor-ew-resize touch-none items-center gap-1 rounded-md bg-stone-900 p-0.5 pr-2 text-stone-400 select-none hover:text-stone-50';
+  control.title = 'Slab thickness: drag to adjust, double-click to reset';
 
-  for (const spec of specs) addSlider(globalControlsEl, spec, markAllDirty);
+  const icon = document.createElement('span');
+  icon.className = 'p-1';
+  setIcon(icon, UnfoldVertical);
+
+  const value = document.createElement('span');
+  value.className = 'w-12 text-right tabular-nums';
+
+  let position = 0;
+  const apply = (next: number): void => {
+    position = Math.min(1, Math.max(0, next));
+    const thickness = thicknessAt(position);
+    value.textContent = formatSlab(thickness);
+    for (const { viewport } of activeViewports) viewport.setSlabThickness(thickness);
+    markAllDirty();
+  };
+
+  let dragStartX = 0;
+  let dragStartPosition = 0;
+  control.addEventListener('pointerdown', (event) => {
+    control.setPointerCapture(event.pointerId);
+    dragStartX = event.clientX;
+    dragStartPosition = position;
+  });
+  control.addEventListener('pointermove', (event) => {
+    if (!control.hasPointerCapture(event.pointerId)) return;
+    apply(dragStartPosition + (event.clientX - dragStartX) / SLAB_DRAG_PIXELS);
+  });
+  control.addEventListener('dblclick', () => apply(0));
+
+  value.textContent = formatSlab(thicknessAt(0));
+  control.append(icon, value);
+  return control;
+}
+
+function buildBlendControl(): HTMLElement {
+  const control = document.createElement('div');
+  control.className = 'flex items-center gap-0.5 rounded-md bg-stone-900 p-0.5';
+
+  const buttons = BLEND_MODES.map(({ mode, label, name }) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'cursor-pointer rounded px-1.5 py-1 leading-4 hover:bg-stone-800';
+    button.title = name;
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      blendMode = mode;
+      for (const { viewport } of activeViewports) viewport.setBlendMode(blendMode);
+      refresh();
+      markAllDirty();
+    });
+    return button;
+  });
+  const refresh = (): void =>
+    buttons.forEach((button, index) => setActive(button, BLEND_MODES[index]!.mode === blendMode));
+
+  refresh();
+  control.append(...buttons);
+  return control;
+}
+
+function buildGlobalControls(volume: Volume): void {
+  globalControlsEl.replaceChildren(buildSlabControl(volume), buildBlendControl());
 }
 
 async function streamSlices(
