@@ -13,7 +13,6 @@ import {
   type Vec3,
   type Viewport,
   type Volume,
-  volumeCenter,
   ZoomTool,
 } from 'pierreangulaire';
 import { decodeSeries, openSeries, type Series, type SliceLoad } from './dicom';
@@ -221,25 +220,13 @@ function rotateAroundAxis(v: Vec3, axis: Vec3, angle: number): Vec3 {
   ];
 }
 
-function projectionScale(volume: Volume, direction: Vec3, factor: number): number {
-  const { dims, spacing, direction: axes } = volume.geometry;
+function halfExtentAlong(volume: Volume, normal: Vec3): number {
+  const { dims, spacing, direction } = volume.geometry;
   let total = 0;
   for (let axis = 0; axis < 3; axis++) {
-    const column = axes[axis] as Vec3;
-    total +=
-      Math.abs(dotVec(column, direction)) *
-      (dims[axis] as number) ** factor *
-      (spacing[axis] as number);
+    total += Math.abs(dotVec(direction[axis]!, normal)) * dims[axis]! * spacing[axis]!;
   }
-  return total;
-}
-
-function spacingAlongNormal(volume: Volume, normal: Vec3): number {
-  return projectionScale(volume, normal, 0);
-}
-
-function halfExtentAlong(volume: Volume, normal: Vec3): number {
-  return 0.5 * projectionScale(volume, normal, 1);
+  return 0.5 * total;
 }
 
 interface SliderSpec {
@@ -290,49 +277,14 @@ interface ControlRange {
   width: number;
 }
 
-function buildControls(viewport: Viewport, volume: Volume, range: ControlRange): void {
+function buildControls(viewport: Viewport, range: ControlRange): void {
   const panel = viewport.canvas.parentElement!;
   panel.querySelector('[data-controls]')?.remove();
   const controls = document.createElement('div');
   controls.dataset.controls = '';
   controls.className = 'absolute bottom-2.5 left-2.5 flex flex-col gap-1 text-shadow-sm';
 
-  const center = volumeCenter(volume.geometry);
-  const normal = viewport.camera.normal;
-  const step = spacingAlongNormal(volume, normal) || 1;
-  const half = halfExtentAlong(volume, normal);
-  const fitZoom = viewport.camera.zoom;
-  const sliceBase = (dotVec(center, normal) - dotVec(volume.geometry.origin, normal)) / step;
-
   const specs: SliderSpec[] = [
-    {
-      name: 'Slice',
-      min: -half,
-      max: half,
-      step,
-      value: 0,
-      format: (v) => String(Math.round(sliceBase + v / step)),
-      apply: (v) => {
-        const { focalPoint, normal: liveNormal } = viewport.camera;
-        const shift = dotVec(center, liveNormal) + v - dotVec(focalPoint, liveNormal);
-        viewport.camera.focalPoint = [
-          focalPoint[0] + liveNormal[0] * shift,
-          focalPoint[1] + liveNormal[1] * shift,
-          focalPoint[2] + liveNormal[2] * shift,
-        ];
-      },
-    },
-    {
-      name: 'Zoom',
-      min: fitZoom * 0.1,
-      max: fitZoom * 1.3,
-      step: 'any',
-      value: fitZoom,
-      format: (v) => `${Math.round((fitZoom / v) * 100)}%`,
-      apply: (v) => {
-        viewport.camera.zoom = v;
-      },
-    },
     {
       name: 'Level',
       min: range.min,
@@ -530,7 +482,7 @@ async function open(files: File[]): Promise<void> {
     return;
   }
   if (!range) return;
-  for (const { viewport } of activeViewports) buildControls(viewport, volume, range);
+  for (const { viewport } of activeViewports) buildControls(viewport, range);
   setStatus(`${series.description} — ${dx}×${dy}×${dz}`);
 }
 
